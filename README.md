@@ -163,6 +163,17 @@ Step 3 - Collect metadata               (1 request per work)
 
 Back-off schedule: 15s → 30s → 60s → 120s → 240s, then give up after 5 attempts.
 
+## Notebook
+
+`ao3_tag_scraper.ipynb` is a Jupyter notebook version of the same pipeline. Open it in
+VS Code, JupyterLab, or Classic Jupyter. Edit the Configuration cell to set
+`LIMIT_PER_TAG`, output filenames, and `RESUME`, then run all cells in order.
+
+> **Kernel restart required after updating:** if you've previously run an older
+> version of the notebook in the same session, do **Kernel → Restart Kernel and Run
+> All Cells**. Stale function definitions from a previous run persist in memory until
+> the kernel is restarted.
+
 ## AO3 terms of service
 
 AO3 asks that scraping tools wait between requests to avoid overloading their
