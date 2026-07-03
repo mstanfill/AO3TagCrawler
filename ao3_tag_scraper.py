@@ -46,7 +46,15 @@ def make_session(user_agent_suffix=None):
     user_agent = "AO3TagScraper/1.0 (+https://github.com/mstanfill/AO3TagCrawler)"
     if user_agent_suffix:
         user_agent = f"{user_agent} {user_agent_suffix}"
-    session.headers.update({"User-Agent": user_agent})
+    # Some responses (notably /tags) appear to vary by request headers beyond
+    # User-Agent; send a standard browser-like header set so we get the same
+    # content a real browser would.
+    session.headers.update({
+        "User-Agent": user_agent,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Connection": "keep-alive",
+    })
     return session
 
 
@@ -123,7 +131,12 @@ def scrape_tag_list(session, tags_out):
 
     tags = parse_tag_list(resp.text)
     if not tags:
+        debug_file = "debug_tags_page.html"
+        with open(debug_file, "w", encoding="utf-8") as debug_f:
+            debug_f.write(resp.text)
         print("No tags found in <ul class=\"tags cloud index group\">.", file=sys.stderr)
+        print(f"  wrote the raw response to {debug_file} for comparison against "
+              f"a browser's View Source", file=sys.stderr)
 
     with open(tags_out, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
