@@ -99,12 +99,17 @@ def parse_tag_list(html):
     "Browse Popular Tags" summary section, which is often empty, plus one
     per fandom/category with its own populated cloud). Collect from every
     such <ul>, not just the first, and dedupe by tag name.
+
+    Tag-cloud links aren't marked with a stable class like "tag" -- AO3
+    sizes them by popularity with classes like "cloud1".."cloudN" (e.g.
+    <a class="cloud2" href="/tags/Abduction/works">Abduction</a>), so take
+    every <a> inside the <ul> rather than filtering by class.
     """
     soup = BeautifulSoup(html, "html.parser")
     seen = set()
     tags = []
     for container in soup.select("ul.tags.cloud.index.group"):
-        for a in container.select("a.tag"):
+        for a in container.select("a"):
             name = a.get_text(strip=True)
             href = a.get("href", "")
             if name and href and name not in seen:
@@ -234,7 +239,10 @@ def _tag_list_field(meta, klass):
     dd = meta.find("dd", class_=klass)
     if not dd:
         return ""
-    return ", ".join(a.get_text(strip=True) for a in dd.find_all("a", class_="tag"))
+    # Don't filter by the anchor's own class (e.g. AO3's tag-cloud links use
+    # popularity classes like "cloud2" rather than a stable "tag" class) --
+    # the <dd> is already scoped to one field, so any <a> inside it is a tag.
+    return ", ".join(a.get_text(strip=True) for a in dd.find_all("a"))
 
 
 def _simple_field(meta, klass):
