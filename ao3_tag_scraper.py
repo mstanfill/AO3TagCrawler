@@ -84,17 +84,24 @@ def fetch(session, url):
 # ---------------------------------------------------------------------------
 
 def parse_tag_list(html):
-    """Extract (tag_name, tag_href) pairs from the /tags tag cloud."""
+    """Extract (tag_name, tag_href) pairs from the /tags page's tag clouds.
+
+    The page has several "<h3 class="landmark heading">...</h3>" sections,
+    each followed by its own "<ul class="tags cloud index group">" (e.g. the
+    "Browse Popular Tags" summary section, which is often empty, plus one
+    per fandom/category with its own populated cloud). Collect from every
+    such <ul>, not just the first, and dedupe by tag name.
+    """
     soup = BeautifulSoup(html, "html.parser")
-    container = soup.select_one("ul.tags.cloud.index.group")
-    if container is None:
-        return []
+    seen = set()
     tags = []
-    for a in container.select("a.tag"):
-        name = a.get_text(strip=True)
-        href = a.get("href", "")
-        if name and href:
-            tags.append((name, href))
+    for container in soup.select("ul.tags.cloud.index.group"):
+        for a in container.select("a.tag"):
+            name = a.get_text(strip=True)
+            href = a.get("href", "")
+            if name and href and name not in seen:
+                seen.add(name)
+                tags.append((name, href))
     return tags
 
 
