@@ -5,7 +5,9 @@ No network access needed -- this only reads/writes local files. Run with:
     python tests/test_ao3_tag_visualizer.py
 """
 import csv
+import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -208,6 +210,48 @@ def main():
         html = f.read()
     check("network HTML is self-contained (no external CDN reference)",
           "cdn.jsdelivr.net" not in html and "unpkg.com" not in html)
+
+    # Filter-controls injection
+    checkbox_class_count = html.count('class="ao3-cat-checkbox"')
+    check("exactly one checkbox per FIELDS_TO_VISUALIZE entry",
+          checkbox_class_count == len(viz.FIELDS_TO_VISUALIZE),
+          f"got {checkbox_class_count}")
+    for field in viz.FIELDS_TO_VISUALIZE:
+        check(f"checkbox present for {field}", f'data-group="{field}"' in html)
+    checkbox_tags = re.findall(r'<input[^>]*class="ao3-cat-checkbox"[^>]*>', html)
+    check("all category checkboxes default-checked",
+          len(checkbox_tags) == len(viz.FIELDS_TO_VISUALIZE)
+          and all("checked" in tag for tag in checkbox_tags))
+
+    check("ALL_SEED_TAGS declared", "const ALL_SEED_TAGS" in html)
+    m = re.search(r"const ALL_SEED_TAGS = (\[.*?\]);", html, re.DOTALL)
+    check("ALL_SEED_TAGS array is parseable", m is not None)
+    if m:
+        parsed = json.loads(m.group(1))
+        check("ALL_SEED_TAGS matches fixture seed tags exactly",
+              set(parsed) == set(seed_tags), f"got {parsed}")
+
+    check("filter panel injected exactly once", html.count('id="ao3-filter-panel"') == 1)
+    check("applyFilters defined exactly once", html.count("function applyFilters") == 1)
+    check("exactly one <body>/</body> pair",
+          html.count("<body>") == 1 and html.count("</body>") == 1)
+    check("document still ends with </html>", html.rstrip().endswith("</html>"))
+    check("tag-picker search input present", 'id="ao3-tag-search"' in html)
+    check("tag-picker chips container present", 'id="ao3-tag-chips"' in html)
+    check("tag-picker dropdown present", 'id="ao3-tag-dropdown"' in html)
+
+    # HTML-special-character safety: a seed tag with &, <, " must round-trip
+    # exactly through the JSON-encoded ALL_SEED_TAGS array (never through an
+    # HTML string), since these characters are legal in real AO3 tag text.
+    special_seed_tags = seed_tags + ['Tony & Steve <3 "Feels"']
+    special_graph = viz.build_bipartite_graph(field_tables, special_seed_tags)
+    special_network_path = os.path.join(tmpdir, "network_special_chars.html")
+    viz.render_network(special_graph, special_network_path)
+    with open(special_network_path, encoding="utf-8") as f:
+        special_html = f.read()
+    m2 = re.search(r"const ALL_SEED_TAGS = (\[.*?\]);", special_html, re.DOTALL)
+    check("special-character tag round-trips through ALL_SEED_TAGS",
+          m2 is not None and 'Tony & Steve <3 "Feels"' in json.loads(m2.group(1)))
 
     heatmap_dir = os.path.join(tmpdir, "heatmaps")
     os.makedirs(heatmap_dir, exist_ok=True)
