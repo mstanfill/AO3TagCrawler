@@ -15,6 +15,7 @@ visualization is built. No network access is required -- this only reads a
 local CSV.
 """
 import argparse
+import json
 import os
 import re
 import sys
@@ -200,6 +201,235 @@ def _strip_bootstrap_cdn(html_path):
         f.write(html)
 
 
+def _seed_tags_from_graph(graph):
+    """Recovers the seed-tag label list, in rank order, from a graph built by
+    build_bipartite_graph. Seed-tag nodes are added first there, and
+    networkx/dict node storage preserves insertion order, so this avoids
+    threading seed_tags through render_network() as a separate parameter."""
+    return [data["label"] for _, data in graph.nodes(data=True)
+            if data.get("group") == "seed_tag"]
+
+
+_FILTER_PANEL_CSS = """
+<style>
+#ao3-filter-panel { font-family: sans-serif; font-size: 14px; padding: 10px 14px;
+  border-bottom: 1px solid #ccc; background: #fafafa; }
+#ao3-filter-panel .ao3-cat-label { margin-right: 14px; white-space: nowrap; }
+#ao3-filter-panel .ao3-swatch { display: inline-block; width: 10px; height: 10px;
+  border-radius: 50%; margin: 0 4px 0 4px; vertical-align: middle; }
+#ao3-tag-picker { margin-top: 8px; position: relative; }
+#ao3-tag-picker .ao3-hint { color: #777; font-weight: normal; font-size: 12px; }
+#ao3-tag-chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+.ao3-tag-chip { background: #4C72B0; color: #fff; border-radius: 12px;
+  padding: 2px 6px 2px 10px; font-size: 12px; display: inline-flex; align-items: center; }
+.ao3-chip-remove { background: none; border: none; color: #fff; cursor: pointer;
+  font-size: 14px; margin-left: 4px; line-height: 1; }
+#ao3-tag-search { width: 260px; padding: 4px 6px; }
+#ao3-tag-dropdown { position: absolute; z-index: 10; background: #fff; border: 1px solid #ccc;
+  max-height: 220px; overflow-y: auto; width: 260px; }
+.ao3-tag-option { padding: 4px 8px; cursor: pointer; }
+.ao3-tag-option:hover { background: #eef; }
+</style>
+"""
+
+_FILTER_PANEL_HTML = """
+<div id="ao3-filter-panel">
+  <div id="ao3-cat-checkboxes">__CHECKBOX_ITEMS__</div>
+  <div id="ao3-tag-picker">
+    <strong>Seed tags</strong> <span class="ao3-hint">(none selected = show all)</span>
+    <div id="ao3-tag-chips"></div>
+    <input type="text" id="ao3-tag-search" placeholder="Search seed tags…" autocomplete="off">
+    <div id="ao3-tag-dropdown" hidden></div>
+  </div>
+</div>
+""" + _FILTER_PANEL_CSS
+
+_FILTER_SCRIPT_TEMPLATE = """
+<script>
+(function () {
+  const ALL_SEED_TAGS = __SEED_TAGS_JSON__;
+  let selectedTags = [];
+
+  function buildNodeGroups() {
+    // Built from our own nodes.get() call rather than reusing any of
+    // pyvis's own internal globals -- nodes/edges/network are the stable
+    // vis-network API surface, not an implementation detail.
+    const map = {};
+    for (const n of nodes.get()) map[n.id] = n.group;
+    return map;
+  }
+
+  function buildSeedAdjacency() {
+    // seed-tag-node-id -> Set of connected attribute-value-node-ids, built
+    // once so applyFilters() never has to rescan every edge.
+    const adj = {};
+    for (const e of edges.get()) {
+      const aSeed = String(e.from).startsWith("tag::");
+      const bSeed = String(e.to).startsWith("tag::");
+      if (aSeed && !bSeed) { (adj[e.from] = adj[e.from] || new Set()).add(e.to); }
+      else if (bSeed && !aSeed) { (adj[e.to] = adj[e.to] || new Set()).add(e.from); }
+    }
+    return adj;
+  }
+
+  const NODE_GROUPS = buildNodeGroups();
+  const SEED_ADJACENCY = buildSeedAdjacency();
+
+  function applyFilters() {
+    const checkedGroups = new Set(
+      Array.from(document.querySelectorAll('.ao3-cat-checkbox:checked'))
+           .map(function (cb) { return cb.dataset.group; })
+    );
+    const seedLabels = selectedTags.length ? selectedTags : ALL_SEED_TAGS;
+    const visibleSeedIds = new Set(seedLabels.map(function (t) { return "tag::" + t; }));
+
+    const reachableAttrIds = new Set();
+    visibleSeedIds.forEach(function (seedId) {
+      const neighbors = SEED_ADJACENCY[seedId];
+      if (neighbors) neighbors.forEach(function (attrId) { reachableAttrIds.add(attrId); });
+    });
+
+    const updates = [];
+    for (const nodeId in NODE_GROUPS) {
+      const group = NODE_GROUPS[nodeId];
+      let hidden;
+      if (group === "seed_tag") {
+        hidden = !visibleSeedIds.has(nodeId);
+      } else {
+        hidden = !(checkedGroups.has(group) && reachableAttrIds.has(nodeId));
+      }
+      updates.push({ id: nodeId, hidden: hidden });
+    }
+    nodes.update(updates); // vis-network auto-hides edges with a hidden endpoint
+  }
+
+  function matchingTags(query) {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    return ALL_SEED_TAGS
+      .filter(function (t) { return selectedTags.indexOf(t) === -1; })
+      .filter(function (t) { return t.toLowerCase().indexOf(q) !== -1; })
+      .slice(0, 20);
+  }
+
+  function renderDropdown(query) {
+    const dropdown = document.getElementById('ao3-tag-dropdown');
+    dropdown.innerHTML = "";
+    const matches = matchingTags(query);
+    matches.forEach(function (tag) {
+      const opt = document.createElement('div');
+      opt.className = 'ao3-tag-option';
+      opt.textContent = tag;
+      opt.dataset.tag = tag;
+      dropdown.appendChild(opt);
+    });
+    dropdown.hidden = matches.length === 0;
+  }
+
+  function renderChips() {
+    const chips = document.getElementById('ao3-tag-chips');
+    chips.innerHTML = "";
+    selectedTags.forEach(function (tag) {
+      const chip = document.createElement('span');
+      chip.className = 'ao3-tag-chip';
+      const label = document.createElement('span');
+      label.textContent = tag;
+      const remove = document.createElement('button');
+      remove.className = 'ao3-chip-remove';
+      remove.textContent = '\\u00d7';
+      remove.dataset.tag = tag;
+      chip.appendChild(label);
+      chip.appendChild(remove);
+      chips.appendChild(chip);
+    });
+  }
+
+  function addTag(tag) {
+    if (selectedTags.indexOf(tag) === -1) selectedTags.push(tag);
+    renderChips();
+    applyFilters();
+  }
+
+  function removeTag(tag) {
+    selectedTags = selectedTags.filter(function (t) { return t !== tag; });
+    renderChips();
+    applyFilters();
+  }
+
+  const searchInput = document.getElementById('ao3-tag-search');
+  searchInput.addEventListener('input', function () { renderDropdown(searchInput.value); });
+
+  document.getElementById('ao3-tag-dropdown').addEventListener('click', function (e) {
+    const opt = e.target.closest('.ao3-tag-option');
+    if (!opt) return;
+    addTag(opt.dataset.tag);
+    searchInput.value = "";
+    document.getElementById('ao3-tag-dropdown').hidden = true;
+  });
+
+  document.getElementById('ao3-tag-chips').addEventListener('click', function (e) {
+    const btn = e.target.closest('.ao3-chip-remove');
+    if (btn) removeTag(btn.dataset.tag);
+  });
+
+  document.addEventListener('click', function (e) {
+    const dropdown = document.getElementById('ao3-tag-dropdown');
+    if (!dropdown.contains(e.target) && e.target !== searchInput) dropdown.hidden = true;
+  });
+
+  document.querySelectorAll('.ao3-cat-checkbox').forEach(function (cb) {
+    cb.addEventListener('change', applyFilters);
+  });
+
+  applyFilters();
+})();
+</script>
+"""
+
+
+def _filter_controls_html(graph):
+    """Builds the injected filter-UI markup and script as a (panel_html,
+    script_html) pair. Pure string building, no file I/O."""
+    seed_tags = _seed_tags_from_graph(graph)
+    # A literal "</script" substring in the JSON would prematurely close the
+    # <script> tag at the HTML-tokenizer level regardless of correct
+    # JS/JSON escaping -- guard against it independent of AO3 data.
+    seed_tags_json = json.dumps(seed_tags).replace("</script", "<\\/script")
+
+    checkbox_items = "\n".join(
+        '<label class="ao3-cat-label">'
+        f'<input type="checkbox" class="ao3-cat-checkbox" data-group="{field}" checked>'
+        f'<span class="ao3-swatch" style="background-color:{FIELD_COLORS[field]};"></span>'
+        f'{field}</label>'
+        for field in FIELDS_TO_VISUALIZE
+    )
+    # FIELDS_TO_VISUALIZE / FIELD_COLORS are hardcoded module constants
+    # (lowercase ascii identifiers, hex colors), never user data, so no
+    # HTML-escaping is needed here. Seed-tag labels (arbitrary AO3 text) are
+    # never interpolated into an HTML string anywhere in this function --
+    # they only ever travel through the JSON-encoded ALL_SEED_TAGS array,
+    # and the client renders them via textContent/dataset, never innerHTML.
+    panel_html = _FILTER_PANEL_HTML.replace("__CHECKBOX_ITEMS__", checkbox_items)
+    script_html = _FILTER_SCRIPT_TEMPLATE.replace("__SEED_TAGS_JSON__", seed_tags_json)
+    return panel_html, script_html
+
+
+def _inject_filter_controls(html_path, graph):
+    with open(html_path, encoding="utf-8") as f:
+        html = f.read()
+    # pyvis's template always emits exactly one bare <body>/</body> pair;
+    # assert instead of silently no-oping if a future pyvis version changes
+    # this, so template drift fails loudly rather than shipping a graph with
+    # no filter UI.
+    assert html.count("<body>") == 1, "expected exactly one <body> tag"
+    assert html.count("</body>") == 1, "expected exactly one </body> tag"
+    panel_html, script_html = _filter_controls_html(graph)
+    html = html.replace("<body>", "<body>" + panel_html, 1)
+    html = html.replace("</body>", script_html + "</body>", 1)
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+
 def render_network(graph, out_path, notebook=False):
     # show_buttons() would pull in its own control-panel styling the same way
     # -- omitted so the output file stays self-contained.
@@ -207,6 +437,7 @@ def render_network(graph, out_path, notebook=False):
     net.from_nx(graph)
     net.write_html(out_path, notebook=notebook)
     _strip_bootstrap_cdn(out_path)
+    _inject_filter_controls(out_path, graph)
     print(f"  wrote {out_path} ({graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges)")
     return net
 
