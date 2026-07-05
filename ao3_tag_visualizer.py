@@ -437,20 +437,20 @@ def _inject_filter_controls(html_path, graph):
         f.write(html)
 
 
+# layout/physics (including improvedLayout and avoidOverlap) are configured
+# at network-construction time via Network.set_options() -- see
+# _NETWORK_OPTIONS_JSON below -- not here. A later network.setOptions() call
+# (this script only runs once the page loads, after the network already
+# exists) is too late to prevent vis-network's improvedLayout initial
+# positioning attempt, which can fail outright on graphs like this one
+# ("This network could not be positioned by this version of the improved
+# layout algorithm") and silently stall stabilization for a long time.
 _STABILIZE_THEN_STOP_SCRIPT = """
 <script>
 (function () {
-  // Run physics with overlap avoidance until the layout settles, then turn
-  // physics off entirely -- without this, vis-network's default config can
-  // leave nodes drifting/jittering indefinitely (especially with graphs
-  // this size), rather than settling into a fixed, readable layout.
-  network.setOptions({
-    physics: {
-      solver: "barnesHut",
-      barnesHut: { avoidOverlap: 1 },
-      stabilization: { enabled: true, iterations: 1000, fit: true }
-    }
-  });
+  // Physics is configured to run (with overlap avoidance) until the layout
+  // settles; once it does, turn physics off entirely so the graph freezes
+  // instead of drifting/jittering indefinitely.
   network.once("stabilizationIterationsDone", function () {
     network.setOptions({ physics: false });
   });
@@ -468,10 +468,29 @@ def _inject_stabilize_then_stop(html_path):
         f.write(html)
 
 
+# Passed to Network.set_options() before write_html() -- must be strict
+# JSON (pyvis's Options.set() does a bare json.loads on it, no JS-style
+# comments/trailing commas/unquoted keys). avoidOverlap spreads nodes out
+# enough to reduce label collisions once physics stabilizes (see
+# _STABILIZE_THEN_STOP_SCRIPT); improvedLayout is disabled because vis-network's
+# own clustering-based initial positioner can fail outright on graphs like
+# this one and silently stall stabilization; iterations is capped low so
+# stabilization can't run away indefinitely on a large/dense graph.
+_NETWORK_OPTIONS_JSON = json.dumps({
+    "layout": {"improvedLayout": False},
+    "physics": {
+        "solver": "barnesHut",
+        "barnesHut": {"avoidOverlap": 0.5},
+        "stabilization": {"enabled": True, "iterations": 200, "fit": True},
+    },
+})
+
+
 def render_network(graph, out_path, notebook=False):
     # show_buttons() would pull in its own control-panel styling the same way
     # -- omitted so the output file stays self-contained.
     net = Network(height="800px", width="100%", notebook=notebook, cdn_resources="in_line")
+    net.set_options(_NETWORK_OPTIONS_JSON)
     net.from_nx(graph)
     net.write_html(out_path, notebook=notebook)
     _strip_bootstrap_cdn(out_path)
