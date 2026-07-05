@@ -437,6 +437,37 @@ def _inject_filter_controls(html_path, graph):
         f.write(html)
 
 
+_STABILIZE_THEN_STOP_SCRIPT = """
+<script>
+(function () {
+  // Run physics with overlap avoidance until the layout settles, then turn
+  // physics off entirely -- without this, vis-network's default config can
+  // leave nodes drifting/jittering indefinitely (especially with graphs
+  // this size), rather than settling into a fixed, readable layout.
+  network.setOptions({
+    physics: {
+      solver: "barnesHut",
+      barnesHut: { avoidOverlap: 1 },
+      stabilization: { enabled: true, iterations: 1000, fit: true }
+    }
+  });
+  network.once("stabilizationIterationsDone", function () {
+    network.setOptions({ physics: false });
+  });
+})();
+</script>
+"""
+
+
+def _inject_stabilize_then_stop(html_path):
+    with open(html_path, encoding="utf-8") as f:
+        html = f.read()
+    assert "</body>" in html, "expected a </body> tag"
+    html = html.replace("</body>", _STABILIZE_THEN_STOP_SCRIPT + "</body>", 1)
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+
 def render_network(graph, out_path, notebook=False):
     # show_buttons() would pull in its own control-panel styling the same way
     # -- omitted so the output file stays self-contained.
@@ -445,6 +476,7 @@ def render_network(graph, out_path, notebook=False):
     net.write_html(out_path, notebook=notebook)
     _strip_bootstrap_cdn(out_path)
     _inject_filter_controls(out_path, graph)
+    _inject_stabilize_then_stop(out_path)
     print(f"  wrote {out_path} ({graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges)")
     return net
 
