@@ -127,6 +127,243 @@ def write_fixture_csv(path):
     return rows
 
 
+def tag_pair_row(work_id, tag, fandom, character, relationship, additional_tags):
+    row = {field: "" for field in METADATA_FIELDS}
+    row.update({
+        "tag": tag,
+        "work_id": work_id,
+        "title": f"Work {work_id}",
+        "author": "author",
+        "rating": "Teen And Up Audiences",
+        "warnings": "No Archive Warnings Apply",
+        "category": "Gen",
+        "fandom": fandom,
+        "relationship": relationship,
+        "character": character,
+        "additional_tags": additional_tags,
+        "language": "English",
+        "series": "",
+        "published": "2026-01-01",
+        "status": "Completed",
+        "status_date": "2026-01-01",
+        "words": "1000",
+        "chapters": "1/1",
+        "comments": "0",
+        "kudos": "0",
+        "bookmarks": "0",
+        "hits": "0",
+        "summary": "",
+    })
+    return row
+
+
+def build_tag_pair_fixture_rows():
+    """A dedicated fixture (separate from build_fixture_rows(), never
+    shared) for --tag-pairs: 10 distinct works (101-110), one (101)
+    deliberately duplicated across two seed tags with identical other
+    fields, to exercise work-level deduplication -- something the main
+    fixture has no need for and deliberately doesn't have.
+
+    Document frequencies (9 distinct tag_ids, n_docs=10):
+      fandom::Alpha=5, fandom::Beta=5, additional_tags::Whump=5,
+      character::Bob=5, additional_tags::Hurt=3, relationship::A/B=3,
+      additional_tags::Fluffy=1, additional_tags::RareTag=1,
+      character::Rarely=1.
+    """
+    rows = [
+        tag_pair_row(101, "Angst", "Alpha", "", "", "Whump"),
+        tag_pair_row(101, "Fluff", "Alpha", "", "", "Whump"),  # same work, 2nd seed tag
+        tag_pair_row(102, "Angst", "Alpha", "", "", "Whump"),
+        tag_pair_row(103, "Angst", "Alpha", "", "", "Whump"),
+        tag_pair_row(104, "Angst", "Alpha", "", "", "Whump"),
+        tag_pair_row(105, "Angst", "Alpha", "", "A/B", "Fluffy, Hurt"),
+        tag_pair_row(106, "Angst", "Beta", "Bob", "", ""),
+        tag_pair_row(107, "Angst", "Beta", "Bob", "", ""),
+        tag_pair_row(108, "Angst", "Beta", "Bob", "", "Whump"),
+        tag_pair_row(109, "Angst", "Beta", "Bob, Rarely", "A/B", "RareTag, Hurt"),
+        tag_pair_row(110, "Angst", "Beta", "Bob", "A/B", "Hurt"),
+    ]
+    return rows
+
+
+def write_tag_pair_fixture_csv(path):
+    rows = build_tag_pair_fixture_rows()
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=METADATA_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    return rows
+
+
+def run_tag_pair_checks(tmpdir, script_path):
+    csv_path = os.path.join(tmpdir, "tag_pair_metadata.csv")
+    write_tag_pair_fixture_csv(csv_path)
+    df = viz.load_metadata(csv_path)
+
+    # 1. Work-level dedup: 11 CSV rows, but 10 distinct works.
+    check("tag-pair fixture has 11 CSV rows", len(df) == 11)
+    check("tag-pair fixture has 10 distinct work_ids", df["work_id"].nunique() == 10)
+
+    tag_table = viz.build_document_tag_table(df)
+    incidence_all = viz.build_tag_incidence_matrix(
+        tag_table, set(tag_table["tag_id"].unique()))
+    check("incidence matrix has 10 document rows (not 11)", incidence_all.shape[0] == 10)
+    check("fandom::Alpha document count is 5 (not 6)",
+          incidence_all["fandom::Alpha"].sum() == 5,
+          f"got {incidence_all['fandom::Alpha'].sum()}")
+
+    n_docs = df["work_id"].nunique()
+    all_tags = set(tag_table["tag_id"].unique())
+    check("tag-pair fixture has exactly 9 distinct tags", len(all_tags) == 9, f"got {all_tags}")
+
+    raw_stats = viz.tag_pair_statistics(incidence_all, n_docs)
+
+    def pair_row(stats, a, b):
+        match = stats[((stats["tag_a"] == a) & (stats["tag_b"] == b)) |
+                       ((stats["tag_a"] == b) & (stats["tag_b"] == a))]
+        return match
+
+    # 2. "Boring middle": lift=1.6, pmi=log2(1.6)=0.678 -- passes min_pair_count
+    # (joint=4>=2) but sits inside the default (-1.0, 1.0) exclusion band.
+    alpha_whump = pair_row(raw_stats, "fandom::Alpha", "additional_tags::Whump")
+    check("Alpha/Whump joint count is 4", not alpha_whump.empty
+          and alpha_whump["joint_count"].iloc[0] == 4,
+          f"got {alpha_whump}")
+    check("Alpha/Whump lift is 1.6",
+          not alpha_whump.empty and abs(alpha_whump["lift"].iloc[0] - 1.6) < 1e-9,
+          f"got {alpha_whump['lift'].iloc[0] if not alpha_whump.empty else None}")
+
+    # 3. Zero-joint-count pair: Alpha's works (101-105) and Bob's works
+    # (106-110) are disjoint -- must be entirely absent, never -inf.
+    alpha_bob = pair_row(raw_stats, "fandom::Alpha", "character::Bob")
+    check("fandom::Alpha / character::Bob (joint=0) is absent from raw stats",
+          alpha_bob.empty, f"got {alpha_bob}")
+
+    # 4. Low-sample noise: RareTag/Rarely co-occur in only work 109 (joint=1),
+    # giving an extreme but meaningless lift=10.0 (pmi=log2(10)=3.32) -- present
+    # in raw stats, but must be dropped once --min-pair-count is applied.
+    rare_pair = pair_row(raw_stats, "additional_tags::RareTag", "character::Rarely")
+    check("RareTag/Rarely present in raw stats with lift=10.0",
+          not rare_pair.empty and abs(rare_pair["lift"].iloc[0] - 10.0) < 1e-9,
+          f"got {rare_pair}")
+    filtered_min_count = viz.apply_min_pair_count(raw_stats, 2)
+    rare_pair_filtered = pair_row(filtered_min_count, "additional_tags::RareTag", "character::Rarely")
+    check("RareTag/Rarely dropped by --min-pair-count 2 despite high lift",
+          rare_pair_filtered.empty, f"got {rare_pair_filtered}")
+
+    # 5. A pair that survives everything: Hurt/A-B, joint=3, lift=10/3=3.333,
+    # pmi=log2(3.333)=1.737 -- passes min_pair_count and the default min_pmi=1.0.
+    hurt_ab = pair_row(raw_stats, "additional_tags::Hurt", "relationship::A/B")
+    check("Hurt/A-B joint count is 3 and lift is 10/3",
+          not hurt_ab.empty and hurt_ab["joint_count"].iloc[0] == 3
+          and abs(hurt_ab["lift"].iloc[0] - 10 / 3) < 1e-9,
+          f"got {hurt_ab}")
+    pair_stats_default, keep_tags_default = viz.build_tag_pair_data(
+        df, top_tags=40, min_pair_count=2, min_pmi=1.0, max_pmi=-1.0)
+    check("Hurt/A-B survives default min_pair_count/min_pmi filtering",
+          not pair_row(pair_stats_default, "additional_tags::Hurt", "relationship::A/B").empty)
+    check("Alpha/Whump (boring middle) is excluded by default thresholds",
+          pair_row(pair_stats_default, "fandom::Alpha", "additional_tags::Whump").empty)
+
+    # 6. Top-K tie-break: at k=5, the four count=5 tags plus, of the two
+    # count=3 tags tied for the 5th slot, the alphabetically-first one
+    # ("additional_tags::Hurt" < "relationship::A/B").
+    top5 = viz.top_k_tags_by_document_frequency(tag_table, 5)
+    expected_top5 = {"fandom::Alpha", "fandom::Beta", "additional_tags::Whump",
+                      "character::Bob", "additional_tags::Hurt"}
+    check("top_k_tags_by_document_frequency(k=5) picks the alphabetical tie-winner",
+          top5 == expected_top5, f"got {top5}")
+    check("relationship::A/B excluded at k=5 despite tying on count",
+          "relationship::A/B" not in top5)
+
+    # 7. tag_pair_matrix all-NaN row: RareTag's only pairs all have joint_count=1
+    # (it appears in exactly 1 document), so every one is dropped by
+    # --min-pair-count 2, leaving it with zero surviving pairs.
+    matrix = viz.tag_pair_matrix(pair_stats_default, keep_tags_default)
+    if "additional_tags::RareTag" in matrix.index:
+        check("RareTag is an all-NaN row after its only pairs are filtered out",
+              matrix.loc["additional_tags::RareTag"].isna().all())
+    else:
+        check("RareTag excluded from top-40 keep_tags (fixture too small to hit this "
+              "case) -- adjust top_tags if this ever fires", False,
+              "RareTag should be in keep_tags at top_tags=40 for a 9-tag universe")
+
+    # 8. CLI wiring / opt-in gating.
+    parser = viz.build_arg_parser()
+    default_cli_args = parser.parse_args(["--input", csv_path])
+    check("--tag-pairs defaults to False", default_cli_args.tag_pairs is False)
+    check("--top-tags defaults to 40", default_cli_args.top_tags == 40)
+    check("--min-pair-count defaults to 2", default_cli_args.min_pair_count == 2)
+    check("--min-pmi defaults to 1.0", default_cli_args.min_pmi == 1.0)
+    check("--max-pmi defaults to -1.0", default_cli_args.max_pmi == -1.0)
+    check("--tag-pair-heatmap-out defaults to None", default_cli_args.tag_pair_heatmap_out is None)
+
+    no_flag_dir = os.path.join(tmpdir, "no_tag_pairs_run")
+    os.makedirs(no_flag_dir, exist_ok=True)
+    no_flag_network = os.path.join(no_flag_dir, "network.html")
+    no_flag_heatmap_dir = os.path.join(no_flag_dir, "heatmaps")
+    no_flag_tag_pair_network = os.path.join(no_flag_dir, "ao3_tag_pair_network.html")
+    result_no_flag = subprocess.run(
+        [sys.executable, script_path, "--input", csv_path,
+         "--network-out", no_flag_network, "--heatmap-out-dir", no_flag_heatmap_dir,
+         "--tag-pair-network-out", no_flag_tag_pair_network],
+        capture_output=True, text=True,
+    )
+    check("main() without --tag-pairs exits 0", result_no_flag.returncode == 0,
+          f"stderr: {result_no_flag.stderr}")
+    check("main() without --tag-pairs does NOT produce the tag-pair network file",
+          not os.path.exists(no_flag_tag_pair_network))
+    check("main() without --tag-pairs does NOT produce the tag-pair heatmap",
+          not os.path.exists(os.path.join(no_flag_heatmap_dir, "heatmap_tag_pairs.png")))
+
+    with_flag_dir = os.path.join(tmpdir, "with_tag_pairs_run")
+    os.makedirs(with_flag_dir, exist_ok=True)
+    with_flag_network = os.path.join(with_flag_dir, "network.html")
+    with_flag_heatmap_dir = os.path.join(with_flag_dir, "heatmaps")
+    with_flag_tag_pair_network = os.path.join(with_flag_dir, "ao3_tag_pair_network.html")
+    result_with_flag = subprocess.run(
+        [sys.executable, script_path, "--input", csv_path, "--tag-pairs",
+         "--network-out", with_flag_network, "--heatmap-out-dir", with_flag_heatmap_dir,
+         "--tag-pair-network-out", with_flag_tag_pair_network],
+        capture_output=True, text=True,
+    )
+    check("main() with --tag-pairs exits 0", result_with_flag.returncode == 0,
+          f"stderr: {result_with_flag.stderr}")
+    check("main() with --tag-pairs produces the tag-pair network file",
+          os.path.exists(with_flag_tag_pair_network))
+    tag_pair_heatmap_path = os.path.join(with_flag_heatmap_dir, "heatmap_tag_pairs.png")
+    check("main() with --tag-pairs produces the tag-pair heatmap",
+          os.path.exists(tag_pair_heatmap_path))
+    with open(with_flag_tag_pair_network, encoding="utf-8") as f:
+        tag_pair_html = f.read()
+    # fandom::Beta survives default filtering (it pairs with character::Bob:
+    # joint=5, lift=2.0, pmi=1.0, clearing the default min_pmi=1.0 bar) --
+    # unlike fandom::Alpha, whose only pairs are either below --min-pair-count
+    # or inside the default "boring middle" exclusion band.
+    check("tag-pair network HTML contains a namespaced node id",
+          '"id": "fandom::Beta"' in tag_pair_html)
+    check("tag-pair network HTML contains lift/pmi in a hover title",
+          "lift=" in tag_pair_html and "pmi=" in tag_pair_html)
+    for field in viz.TAG_PAIR_FIELDS:
+        check(f"tag-pair network HTML has a checkbox for {field}",
+              f'data-group="{field}"' in tag_pair_html)
+
+    # 9. Soft-warning: inverted/overlapping thresholds shouldn't be fatal.
+    warn_result = subprocess.run(
+        [sys.executable, script_path, "--input", csv_path, "--tag-pairs",
+         "--min-pmi", "0", "--max-pmi", "0",
+         "--network-out", os.path.join(tmpdir, "warn_network.html"),
+         "--heatmap-out-dir", os.path.join(tmpdir, "warn_heatmaps"),
+         "--tag-pair-network-out", os.path.join(tmpdir, "warn_tag_pair_network.html")],
+        capture_output=True, text=True,
+    )
+    check("--min-pmi <= --max-pmi is a non-fatal warning, not an error",
+          warn_result.returncode == 0, f"stderr: {warn_result.stderr}")
+    check("warning text mentions --min-pmi and --max-pmi",
+          "--min-pmi" in warn_result.stderr and "--max-pmi" in warn_result.stderr,
+          f"stderr: {warn_result.stderr}")
+
+
 def main():
     tmpdir = tempfile.mkdtemp(prefix="ao3_viz_test_")
     csv_path = os.path.join(tmpdir, "ao3_tag_metadata.csv")
@@ -407,6 +644,9 @@ def main():
     for field in viz.FIELDS_TO_VISUALIZE:
         check(f"default-mode field_tables[{field}] matches old min_count=2-only call",
               field_tables_default[field].equals(field_tables_old_style_call[field]))
+
+    # 10. --tag-pairs: dedicated fixture, own section (see run_tag_pair_checks).
+    run_tag_pair_checks(tmpdir, script_path)
 
     print()
     if FAILURES:

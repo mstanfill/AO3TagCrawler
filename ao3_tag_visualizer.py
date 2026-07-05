@@ -24,6 +24,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import networkx as nx
+import numpy as np
 import pandas as pd
 import seaborn as sns
 from pyvis.network import Network
@@ -33,6 +34,10 @@ DELIMITER = ", "
 FIELDS_TO_VISUALIZE = ["rating", "warnings", "category", "fandom", "additional_tags"]
 FIELDS_TOP_N_ELIGIBLE = {"fandom", "additional_tags"}
 
+# Tag-pair co-occurrence (--tag-pairs): folksonomy-style tags only, not the
+# more categorical rating/warnings/category fields.
+TAG_PAIR_FIELDS = ["fandom", "relationship", "character", "additional_tags"]
+
 FIELD_COLORS = {
     "seed_tag": "#4C72B0",
     "rating": "#DD8452",
@@ -40,7 +45,12 @@ FIELD_COLORS = {
     "category": "#C44E52",
     "fandom": "#8172B2",
     "additional_tags": "#937860",
+    "character": "#CCB974",
+    "relationship": "#64B5CD",
 }
+
+MOST_LIKELY_EDGE_COLOR = "#2A9D8F"    # pair co-occurs more often than chance
+LEAST_LIKELY_EDGE_COLOR = "#E63946"   # pair co-occurs less often than chance
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +158,8 @@ def cooccurrence_matrix(counts, field, seed_tags, normalize_by=None):
     return matrix
 
 
-def render_heatmap(matrix, field, out_path, normalized=False):
+def render_heatmap(matrix, field, out_path, normalized=False, cmap="viridis",
+                    center=None, xlabel=None, ylabel=None, cbar_label=None, fmt=None):
     if matrix.empty or matrix.shape[1] == 0:
         print(f"  skipping heatmap for {field}: no data after filtering", file=sys.stderr)
         return
@@ -157,12 +168,17 @@ def render_heatmap(matrix, field, out_path, normalized=False):
     height = max(6, 0.22 * matrix.shape[0] + 3)
     fig, ax = plt.subplots(figsize=(width, height))
     annot = matrix.shape[0] * matrix.shape[1] <= 500
-    fmt = ".1f" if normalized else "d"
-    label = "% of tag's works" if normalized else "co-occurrence count"
-    sns.heatmap(matrix, annot=annot, fmt=fmt, cmap="viridis",
-                cbar_kws={"label": label}, ax=ax)
-    ax.set_xlabel(field)
-    ax.set_ylabel("seed tag")
+    if fmt is None:
+        fmt = ".1f" if normalized else "d"
+    if cbar_label is None:
+        cbar_label = "% of tag's works" if normalized else "co-occurrence count"
+    # mask=matrix.isna() is a no-op for the existing pipeline's matrices
+    # (never contain NaN); the tag-pair matrix uses NaN for "no data" (as
+    # opposed to 0, a meaningful independence value), rendered as blank cells.
+    sns.heatmap(matrix, annot=annot, fmt=fmt, cmap=cmap, center=center,
+                mask=matrix.isna(), cbar_kws={"label": cbar_label}, ax=ax)
+    ax.set_xlabel(xlabel if xlabel is not None else field)
+    ax.set_ylabel(ylabel if ylabel is not None else "seed tag")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -449,6 +465,205 @@ def _inject_filter_controls(html_path, graph):
         f.write(html)
 
 
+def _all_tags_from_graph(graph):
+    """Recovers [{"id", "label", "field"}] for every node, in insertion
+    order, for the tag-pair picker. Unlike the bipartite picker (which
+    stores plain labels, since seed tags can't collide with each other),
+    this stores the full namespaced node id as the selection key -- label
+    alone is exactly what CAN collide across fields (e.g. a fandom and a
+    character sharing a literal name)."""
+    return [{"id": node_id, "label": data["label"], "field": data["group"]}
+            for node_id, data in graph.nodes(data=True)]
+
+
+_TAG_PAIR_FILTER_PANEL_HTML = """
+<div id="ao3-filter-panel">
+  <div id="ao3-cat-checkboxes">__CHECKBOX_ITEMS__</div>
+  <div id="ao3-tag-picker">
+    <strong>Tags</strong> <span class="ao3-hint">(none selected = show all;
+    selecting narrows to those tags + their direct connections)</span>
+    <div id="ao3-tag-chips"></div>
+    <input type="text" id="ao3-tag-search" placeholder="Search tags…" autocomplete="off">
+    <div id="ao3-tag-dropdown" hidden></div>
+  </div>
+</div>
+""" + _FILTER_PANEL_CSS
+
+_TAG_PAIR_FILTER_SCRIPT_TEMPLATE = """
+<script>
+(function () {
+  const ALL_TAGS = __ALL_TAGS_JSON__;
+  let selectedTagIds = [];
+
+  function buildNodeGroups() {
+    const map = {};
+    for (const n of nodes.get()) map[n.id] = n.group;
+    return map;
+  }
+
+  function buildFullAdjacency() {
+    // Every node here is a "tag" -- unlike the bipartite graph, there's no
+    // privileged always-visible node class, so adjacency is symmetric and
+    // built for every node, not just one side of a bipartite split.
+    const adj = {};
+    for (const e of edges.get()) {
+      (adj[e.from] = adj[e.from] || new Set()).add(e.to);
+      (adj[e.to] = adj[e.to] || new Set()).add(e.from);
+    }
+    return adj;
+  }
+
+  const NODE_GROUPS = buildNodeGroups();
+  const FULL_ADJACENCY = buildFullAdjacency();
+
+  function applyFilters() {
+    const checkedGroups = new Set(
+      Array.from(document.querySelectorAll('.ao3-cat-checkbox:checked'))
+           .map(function (cb) { return cb.dataset.group; })
+    );
+    let reachable = null;
+    if (selectedTagIds.length) {
+      reachable = new Set();
+      selectedTagIds.forEach(function (id) {
+        reachable.add(id);
+        const neighbors = FULL_ADJACENCY[id];
+        if (neighbors) neighbors.forEach(function (n) { reachable.add(n); });
+      });
+    }
+    const updates = [];
+    for (const nodeId in NODE_GROUPS) {
+      let hidden = !checkedGroups.has(NODE_GROUPS[nodeId]);
+      if (!hidden && reachable) hidden = !reachable.has(nodeId);
+      updates.push({ id: nodeId, hidden: hidden });
+    }
+    nodes.update(updates); // vis-network auto-hides edges with a hidden endpoint
+  }
+
+  function tagById(id) {
+    return ALL_TAGS.find(function (t) { return t.id === id; });
+  }
+
+  function matchingTags(query) {
+    const q = query.trim().toLowerCase();
+    const available = ALL_TAGS.filter(function (t) { return selectedTagIds.indexOf(t.id) === -1; });
+    if (!q) return available;
+    return available.filter(function (t) {
+      return t.label.toLowerCase().indexOf(q) !== -1 || t.field.toLowerCase().indexOf(q) !== -1;
+    });
+  }
+
+  function renderDropdown(query) {
+    const dropdown = document.getElementById('ao3-tag-dropdown');
+    dropdown.innerHTML = "";
+    const matches = matchingTags(query);
+    matches.forEach(function (t) {
+      const opt = document.createElement('div');
+      opt.className = 'ao3-tag-option';
+      opt.textContent = t.label + " (" + t.field + ")";
+      opt.dataset.id = t.id;
+      dropdown.appendChild(opt);
+    });
+    dropdown.hidden = matches.length === 0;
+  }
+
+  function renderChips() {
+    const chips = document.getElementById('ao3-tag-chips');
+    chips.innerHTML = "";
+    selectedTagIds.forEach(function (id) {
+      const t = tagById(id);
+      const chip = document.createElement('span');
+      chip.className = 'ao3-tag-chip';
+      const label = document.createElement('span');
+      label.textContent = t ? (t.label + " (" + t.field + ")") : id;
+      const remove = document.createElement('button');
+      remove.className = 'ao3-chip-remove';
+      remove.textContent = '\\u00d7';
+      remove.dataset.id = id;
+      chip.appendChild(label);
+      chip.appendChild(remove);
+      chips.appendChild(chip);
+    });
+  }
+
+  function addTag(id) {
+    if (selectedTagIds.indexOf(id) === -1) selectedTagIds.push(id);
+    renderChips();
+    applyFilters();
+  }
+
+  function removeTag(id) {
+    selectedTagIds = selectedTagIds.filter(function (x) { return x !== id; });
+    renderChips();
+    applyFilters();
+  }
+
+  const searchInput = document.getElementById('ao3-tag-search');
+  searchInput.addEventListener('input', function () { renderDropdown(searchInput.value); });
+  searchInput.addEventListener('focus', function () { renderDropdown(searchInput.value); });
+  searchInput.addEventListener('click', function () { renderDropdown(searchInput.value); });
+
+  document.getElementById('ao3-tag-dropdown').addEventListener('click', function (e) {
+    const opt = e.target.closest('.ao3-tag-option');
+    if (!opt) return;
+    addTag(opt.dataset.id);
+    searchInput.value = "";
+    document.getElementById('ao3-tag-dropdown').hidden = true;
+  });
+
+  document.getElementById('ao3-tag-chips').addEventListener('click', function (e) {
+    const btn = e.target.closest('.ao3-chip-remove');
+    if (btn) removeTag(btn.dataset.id);
+  });
+
+  document.addEventListener('click', function (e) {
+    const dropdown = document.getElementById('ao3-tag-dropdown');
+    if (!dropdown.contains(e.target) && e.target !== searchInput) dropdown.hidden = true;
+  });
+
+  document.querySelectorAll('.ao3-cat-checkbox').forEach(function (cb) {
+    cb.addEventListener('change', applyFilters);
+  });
+
+  applyFilters();
+})();
+</script>
+"""
+
+
+def _tag_pair_filter_controls_html(graph):
+    """Same shape as _filter_controls_html, for the one-mode tag-pair graph:
+    checkboxes iterate TAG_PAIR_FIELDS (every node's group is checkbox-
+    controlled -- there's no privileged always-visible class like
+    seed_tag), and the tag picker's underlying data is
+    [{"id","label","field"}, ...] rather than a flat label list, since
+    label alone can collide across fields."""
+    all_tags = _all_tags_from_graph(graph)
+    all_tags_json = json.dumps(all_tags).replace("</script", "<\\/script")
+
+    checkbox_items = "\n".join(
+        '<label class="ao3-cat-label">'
+        f'<input type="checkbox" class="ao3-cat-checkbox" data-group="{field}" checked>'
+        f'<span class="ao3-swatch" style="background-color:{FIELD_COLORS[field]};"></span>'
+        f'{field}</label>'
+        for field in TAG_PAIR_FIELDS
+    )
+    panel_html = _TAG_PAIR_FILTER_PANEL_HTML.replace("__CHECKBOX_ITEMS__", checkbox_items)
+    script_html = _TAG_PAIR_FILTER_SCRIPT_TEMPLATE.replace("__ALL_TAGS_JSON__", all_tags_json)
+    return panel_html, script_html
+
+
+def _inject_tag_pair_filter_controls(html_path, graph):
+    with open(html_path, encoding="utf-8") as f:
+        html = f.read()
+    assert html.count("<body>") == 1, "expected exactly one <body> tag"
+    assert html.count("</body>") == 1, "expected exactly one </body> tag"
+    panel_html, script_html = _tag_pair_filter_controls_html(graph)
+    html = html.replace("<body>", "<body>" + panel_html, 1)
+    html = html.replace("</body>", script_html + "</body>", 1)
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+
 # layout/physics (including improvedLayout and avoidOverlap) are configured
 # at network-construction time via Network.set_options() -- see
 # _NETWORK_OPTIONS_JSON below -- not here. A later network.setOptions() call
@@ -498,7 +713,7 @@ _NETWORK_OPTIONS_JSON = json.dumps({
 })
 
 
-def render_network(graph, out_path, notebook=False):
+def render_network(graph, out_path, notebook=False, inject_filters=_inject_filter_controls):
     # show_buttons() would pull in its own control-panel styling the same way
     # -- omitted so the output file stays self-contained.
     net = Network(height="800px", width="100%", notebook=notebook, cdn_resources="in_line")
@@ -506,10 +721,186 @@ def render_network(graph, out_path, notebook=False):
     net.from_nx(graph)
     net.write_html(out_path, notebook=notebook)
     _strip_bootstrap_cdn(out_path)
-    _inject_filter_controls(out_path, graph)
+    inject_filters(out_path, graph)
     _inject_stabilize_then_stop(out_path)
     print(f"  wrote {out_path} ({graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges)")
     return net
+
+
+# ---------------------------------------------------------------------------
+# Tag-pair co-occurrence statistics (--tag-pairs)
+#
+# A different question from the rest of this module: not "which attribute
+# values does a seed tag associate with", but "which pairs of tags, pooled
+# across fandom/relationship/character/additional_tags, statistically tend
+# to co-occur (or avoid each other) more than chance would predict". Raw
+# co-occurrence counts conflate "both tags are individually common" with
+# "these two tags are actually associated" -- lift and PMI correct for that.
+# ---------------------------------------------------------------------------
+
+def build_document_tag_table(df, fields=TAG_PAIR_FIELDS):
+    """Long (work_id, tag_id) table, one row per (distinct work, namespaced
+    tag). A work matching multiple seed-tag searches gets a separate row
+    per seed tag in df, all sharing the same work_id and identical
+    fandom/relationship/character/additional_tags content (same AO3 work
+    page) -- so df is deduplicated to one row per work_id first; this
+    analysis doesn't care which seed tag(s) found a work, only its own
+    content. tag_id is namespaced f"{field}::{value}" (same scheme
+    build_bipartite_graph uses) so e.g. a fandom and a character sharing a
+    literal name are never conflated."""
+    deduped = df.drop_duplicates(subset="work_id", keep="first")
+    tables = []
+    for field in fields:
+        exploded = explode_field(deduped, field)
+        exploded = exploded.rename(columns={field: "value"})
+        exploded["tag_id"] = field + "::" + exploded["value"]
+        tables.append(exploded[["work_id", "tag_id"]])
+    return pd.concat(tables, ignore_index=True)
+
+
+def top_k_tags_by_document_frequency(tag_table, k):
+    """Analogous to top_n_values, but over the unified tag pool at the
+    work/document level (tag_table has at most one row per (work_id,
+    tag_id), so counting rows == counting documents). Returns None (no
+    filtering) if k is None. Ties broken alphabetically, same convention
+    as top_n_values."""
+    if k is None:
+        return None
+    counts = tag_table["tag_id"].value_counts().reset_index()
+    counts.columns = ["tag_id", "count"]
+    counts = counts.sort_values(["count", "tag_id"], ascending=[False, True])
+    return set(counts["tag_id"].head(k))
+
+
+def build_tag_incidence_matrix(tag_table, keep_tags):
+    """Documents x tags boolean incidence matrix (index=work_id,
+    columns=sorted keep_tags, int8). NOTE: its row count is only documents
+    containing >=1 kept tag -- it is NOT the total document count and must
+    never be used as n_docs (a work with none of the top-K tags has no row
+    here, but still belongs in P(A)'s denominator). Column sums (per-tag
+    totals) ARE always correct regardless of this row restriction."""
+    filtered = tag_table[tag_table["tag_id"].isin(keep_tags)]
+    incidence = pd.crosstab(filtered["work_id"], filtered["tag_id"]) > 0
+    return incidence.reindex(columns=sorted(keep_tags), fill_value=False).astype("int8")
+
+
+def tag_pair_statistics(incidence, n_docs):
+    """Fully vectorized pairwise lift/PMI -- no nested Python loop over
+    pairs. joint = incidence.T @ incidence gives the whole tags x tags
+    co-occurrence matrix in one matmul; its diagonal is each tag's own
+    total document count (marginal). n_docs must be the TRUE total document
+    count (df["work_id"].nunique() on the original, undeduplicated df --
+    nunique() already ignores duplicate rows), never incidence.shape[0]
+    (see build_tag_incidence_matrix) -- using the latter would silently
+    undercount the corpus and skew every lift/PMI value.
+
+    lift(A,B) = joint_count * n_docs / (count_a * count_b); pmi =
+    log2(lift). Pairs with joint_count == 0 are dropped before the log2
+    call (never assigned -inf) -- they carry no real co-occurrence signal.
+
+    Returns a long DataFrame [tag_a, tag_b, joint_count, count_a, count_b,
+    lift, pmi], one row per unordered pair with tag_a < tag_b, joint_count
+    > 0.
+    """
+    tags = list(incidence.columns)
+    values = incidence.to_numpy(dtype=np.int64)
+    joint = values.T @ values
+    marginal = np.diag(joint)
+
+    i_idx, j_idx = np.triu_indices(len(tags), k=1)
+    joint_counts = joint[i_idx, j_idx]
+    nonzero = joint_counts > 0
+    i_idx, j_idx, joint_counts = i_idx[nonzero], j_idx[nonzero], joint_counts[nonzero]
+
+    count_a = marginal[i_idx]
+    count_b = marginal[j_idx]
+    lift = (joint_counts * n_docs) / (count_a * count_b)
+    pmi = np.log2(lift)
+
+    return pd.DataFrame({
+        "tag_a": [tags[i] for i in i_idx],
+        "tag_b": [tags[j] for j in j_idx],
+        "joint_count": joint_counts,
+        "count_a": count_a,
+        "count_b": count_b,
+        "lift": lift,
+        "pmi": pmi,
+    })
+
+
+def apply_min_pair_count(pair_stats, min_pair_count):
+    """Analogous to apply_min_count. Must run before apply_pmi_thresholds --
+    this is what keeps a pair like (count_a=1, count_b=1, joint=1), whose
+    lift is an enormous but statistically meaningless n_docs, out of the
+    ranked/thresholded output."""
+    return pair_stats[pair_stats["joint_count"] >= min_pair_count]
+
+
+def apply_pmi_thresholds(pair_stats, min_pmi, max_pmi):
+    """Keeps a pair iff pmi >= min_pmi (co-occurs more than chance, "most
+    likely") OR pmi <= max_pmi (co-occurs less than chance, "least
+    likely"), dropping the "boring middle" near independence."""
+    return pair_stats[(pair_stats["pmi"] >= min_pmi) | (pair_stats["pmi"] <= max_pmi)]
+
+
+def tag_pair_matrix(pair_stats, tags, value_col="pmi"):
+    """Symmetric tag x tag DataFrame (index=columns=sorted(tags)). Cells
+    for pairs absent from pair_stats (filtered out upstream, or originally
+    joint_count==0) are NaN, not 0 -- 0 is itself a meaningful PMI value
+    (independence) and must not be confused with "no data". The diagonal
+    is always NaN. tags is the full top-K keep_tags set (not just tags
+    that survived pair filtering), so a tag with zero surviving pairs
+    still appears as an all-NaN row/column, mirroring the existing "Found
+    Family stays as an all-zero row" precedent for the seed-tag heatmaps."""
+    ordered = sorted(tags)
+    matrix = pd.DataFrame(np.nan, index=ordered, columns=ordered)
+    for _, row in pair_stats.iterrows():
+        if row["tag_a"] in matrix.index and row["tag_b"] in matrix.index:
+            matrix.loc[row["tag_a"], row["tag_b"]] = row[value_col]
+            matrix.loc[row["tag_b"], row["tag_a"]] = row[value_col]
+    return matrix
+
+
+def build_tag_pair_graph(pair_stats):
+    """One-mode (non-bipartite) graph: node id = the tag_id itself (e.g.
+    "fandom::Alpha"), label = the part after "::", group/color = the part
+    before "::" (field recovered from the id -- no separate lookup table
+    needed, since namespacing already encodes it)."""
+    graph = nx.Graph()
+    for _, row in pair_stats.iterrows():
+        for tag_id in (row["tag_a"], row["tag_b"]):
+            if tag_id not in graph:
+                field, _, value = tag_id.partition("::")
+                graph.add_node(tag_id, label=value, group=field,
+                                color=FIELD_COLORS[field], title=tag_id)
+        relation = "more likely than chance" if row["pmi"] > 0 else "less likely than chance"
+        edge_color = MOST_LIKELY_EDGE_COLOR if row["pmi"] > 0 else LEAST_LIKELY_EDGE_COLOR
+        graph.add_edge(
+            row["tag_a"], row["tag_b"], weight=int(row["joint_count"]),
+            pmi=float(row["pmi"]), lift=float(row["lift"]),
+            joint_count=int(row["joint_count"]), color=edge_color,
+            title=(f"{row['tag_a']} × {row['tag_b']}: {relation} "
+                   f"(lift={row['lift']:.2f}, pmi={row['pmi']:.2f}, "
+                   f"joint count={int(row['joint_count'])})"),
+        )
+    return graph
+
+
+def build_tag_pair_data(df, top_tags, min_pair_count, min_pmi, max_pmi):
+    """Orchestrator, analogous to build_field_data. Returns (pair_stats,
+    keep_tags) -- keep_tags is the full top-K tag universe (needed by
+    tag_pair_matrix separately from pair_stats, which only has surviving
+    pairs)."""
+    tag_table = build_document_tag_table(df)
+    keep_tags = top_k_tags_by_document_frequency(tag_table, top_tags)
+    if keep_tags is None:
+        keep_tags = set(tag_table["tag_id"].unique())
+    incidence = build_tag_incidence_matrix(tag_table, keep_tags)
+    n_docs = df["work_id"].nunique()
+    pair_stats = tag_pair_statistics(incidence, n_docs)
+    pair_stats = apply_min_pair_count(pair_stats, min_pair_count)
+    pair_stats = apply_pmi_thresholds(pair_stats, min_pmi, max_pmi)
+    return pair_stats, keep_tags
 
 
 # ---------------------------------------------------------------------------
@@ -561,6 +952,32 @@ def build_arg_parser():
                          help="Only build the network, skip heatmaps")
     parser.add_argument("--heatmaps-only", action="store_true",
                          help="Only build heatmaps, skip the network")
+    parser.add_argument("--tag-pairs", action="store_true",
+                         help="Also compute/render tag-pair co-occurrence statistics "
+                              "(lift/PMI) across fandom/relationship/character/"
+                              "additional_tags -- which pairs of tags co-occur "
+                              "statistically more or less than chance (default: off)")
+    parser.add_argument("--top-tags", type=int, default=40,
+                         help="For --tag-pairs: top N tags overall, by document "
+                              "frequency, before computing pairwise stats (default: 40)")
+    parser.add_argument("--min-pair-count", type=int, default=2,
+                         help="For --tag-pairs: drop pairs co-occurring fewer than this "
+                              "many times -- lift/PMI is unreliable at tiny sample sizes "
+                              "(default: 2)")
+    parser.add_argument("--min-pmi", type=float, default=1.0,
+                         help="For --tag-pairs: \"most likely\" threshold -- keep pairs "
+                              "with PMI (log2 of lift) at or above this (default: 1.0, "
+                              "i.e. co-occurring at least twice as often as chance)")
+    parser.add_argument("--max-pmi", type=float, default=-1.0,
+                         help="For --tag-pairs: \"least likely\" threshold -- keep pairs "
+                              "with PMI at or below this (default: -1.0, i.e. co-occurring "
+                              "at most half as often as chance)")
+    parser.add_argument("--tag-pair-network-out", default="ao3_tag_pair_network.html",
+                         help="For --tag-pairs: network HTML output "
+                              "(default: ao3_tag_pair_network.html)")
+    parser.add_argument("--tag-pair-heatmap-out", default=None,
+                         help="For --tag-pairs: heatmap PNG output "
+                              "(default: <--heatmap-out-dir>/heatmap_tag_pairs.png)")
     return parser
 
 
@@ -618,6 +1035,29 @@ def main(argv=None):
             matrix = cooccurrence_matrix(counts, field, seed_tags, normalize_by=work_counts)
             out_path = os.path.join(args.heatmap_out_dir, f"heatmap_{field}.png")
             render_heatmap(matrix, field, out_path, normalized=True)
+
+    if args.tag_pairs:
+        if args.min_pmi <= args.max_pmi:
+            print(f"  warning: --min-pmi ({args.min_pmi}) <= --max-pmi ({args.max_pmi}) -- "
+                  "these bands overlap and will include nearly all pairs", file=sys.stderr)
+
+        pair_stats, keep_tags = build_tag_pair_data(
+            df, args.top_tags, args.min_pair_count, args.min_pmi, args.max_pmi)
+
+        if not args.heatmaps_only:
+            print("Building tag-pair network graph")
+            tag_pair_graph = build_tag_pair_graph(pair_stats)
+            render_network(tag_pair_graph, args.tag_pair_network_out,
+                            inject_filters=_inject_tag_pair_filter_controls)
+
+        if not args.network_only:
+            print("Building tag-pair heatmap")
+            matrix = tag_pair_matrix(pair_stats, keep_tags, value_col="pmi")
+            out_path = args.tag_pair_heatmap_out or os.path.join(
+                args.heatmap_out_dir, "heatmap_tag_pairs.png")
+            os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+            render_heatmap(matrix, "tag pair", out_path, cmap="coolwarm", center=0,
+                           xlabel="tag", ylabel="tag", cbar_label="PMI (log2 lift)", fmt=".2f")
 
 
 if __name__ == "__main__":
