@@ -240,6 +240,16 @@ def main():
     check("tag-picker chips container present", 'id="ao3-tag-chips"' in html)
     check("tag-picker dropdown present", 'id="ao3-tag-dropdown"' in html)
 
+    # Physics stabilize-then-stop. "stabilizationIterationsDone" and
+    # "avoidOverlap" are also vis-network's own built-in identifiers, so they
+    # legitimately appear inside the vendored library bundle too -- check our
+    # own injected call signature (network.setOptions({ physics: false }))
+    # instead, which vis-network's own minified code won't happen to match.
+    check("stabilization listener present", "stabilizationIterationsDone" in html)
+    check("avoidOverlap configured", "avoidOverlap: 1" in html)
+    check("stabilize-then-stop script injected exactly once",
+          html.count("network.setOptions({ physics: false })") == 1)
+
     # HTML-special-character safety: a seed tag with &, <, " must round-trip
     # exactly through the JSON-encoded ALL_SEED_TAGS array (never through an
     # HTML string), since these characters are legal in real AO3 tag text.
