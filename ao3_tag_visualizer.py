@@ -304,12 +304,14 @@ _FILTER_SCRIPT_TEMPLATE = """
   }
 
   function matchingTags(query) {
+    // Empty query -> the full remaining list (not []), so clicking/focusing
+    // the search box opens the dropdown with every not-yet-selected tag,
+    // not just typed-in matches. The scrollable dropdown (max-height in CSS)
+    // handles a full ~200-tag list fine, so no arbitrary result cap either.
     const q = query.trim().toLowerCase();
-    if (!q) return [];
-    return ALL_SEED_TAGS
-      .filter(function (t) { return selectedTags.indexOf(t) === -1; })
-      .filter(function (t) { return t.toLowerCase().indexOf(q) !== -1; })
-      .slice(0, 20);
+    const available = ALL_SEED_TAGS.filter(function (t) { return selectedTags.indexOf(t) === -1; });
+    if (!q) return available;
+    return available.filter(function (t) { return t.toLowerCase().indexOf(q) !== -1; });
   }
 
   function renderDropdown(query) {
@@ -358,6 +360,11 @@ _FILTER_SCRIPT_TEMPLATE = """
 
   const searchInput = document.getElementById('ao3-tag-search');
   searchInput.addEventListener('input', function () { renderDropdown(searchInput.value); });
+  // Open the full tag list on focus/click too, not just once the user has
+  // typed something -- gives a visible "click to open" affordance like a
+  // normal dropdown, instead of only reacting to keystrokes.
+  searchInput.addEventListener('focus', function () { renderDropdown(searchInput.value); });
+  searchInput.addEventListener('click', function () { renderDropdown(searchInput.value); });
 
   document.getElementById('ao3-tag-dropdown').addEventListener('click', function (e) {
     const opt = e.target.closest('.ao3-tag-option');
