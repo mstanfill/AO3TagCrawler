@@ -187,6 +187,50 @@ def main():
     check("heatmap matrix keeps Found Family as an all-zero row",
           "Found Family" in matrix.index and (matrix.loc["Found Family"] == 0).all())
 
+    # 4b. --min-proportion: tells apart pairs that --min-count treats identically.
+    # Found Family's only warnings pair is 1/1 of its works (100%); Angst's rare
+    # "Graphic Depictions..." pair is 1 of Angst's many works (a few percent) --
+    # both are just "count=1" to apply_min_count, but very different proportions.
+    work_counts = df["tag"].value_counts()
+    check("fixture: Found Family has exactly 1 work", work_counts["Found Family"] == 1)
+    # The fixture's warnings cell "Graphic Depictions Of Violence, Major
+    # Character Death" is itself a multi-value cell (delimiter ", "), so it
+    # explodes into two separate single-value rows -- use one of those, not
+    # the original joined string, which never appears in the exploded table.
+    violence_warning = "Major Character Death"
+    violence_row = warnings_counts[(warnings_counts["tag"] == "Angst") &
+                                    (warnings_counts["warnings"] == violence_warning)]
+    check("Angst's violence-warning pair has count 1",
+          not violence_row.empty and violence_row["count"].iloc[0] == 1)
+    angst_violence_proportion = violence_row["count"].iloc[0] / work_counts["Angst"]
+    check("Angst's violence-warning pair is well under 50% of its works",
+          angst_violence_proportion < 0.5, f"got {angst_violence_proportion}")
+
+    by_count_1 = viz.apply_min_count(warnings_counts, 1)
+    check("min-count=1 keeps Found Family's only warnings pair",
+          not by_count_1[by_count_1["tag"] == "Found Family"].empty)
+    check("min-count=1 also keeps Angst's rare violence-warning pair (can't tell them apart)",
+          not by_count_1[(by_count_1["tag"] == "Angst") &
+                          (by_count_1["warnings"] == violence_warning)].empty)
+
+    by_prop_50 = viz.apply_min_proportion(warnings_counts, work_counts, 0.5)
+    check("min-proportion=0.5 keeps Found Family's 100% pair",
+          not by_prop_50[by_prop_50["tag"] == "Found Family"].empty)
+    check("min-proportion=0.5 drops Angst's rare violence-warning pair "
+          "(unlike min-count=1)",
+          by_prop_50[(by_prop_50["tag"] == "Angst") &
+                     (by_prop_50["warnings"] == violence_warning)].empty)
+
+    field_tables_prop = viz.build_field_data(df, top_fandoms=20, top_additional_tags=40,
+                                              work_counts=work_counts,
+                                              min_count=None, min_proportion=0.5)
+    prop_warnings = field_tables_prop["warnings"]
+    check("build_field_data(proportion mode) keeps Found Family's warnings pair",
+          not prop_warnings[prop_warnings["tag"] == "Found Family"].empty)
+    check("build_field_data(proportion mode) drops Angst's rare violence-warning pair",
+          prop_warnings[(prop_warnings["tag"] == "Angst") &
+                         (prop_warnings["warnings"] == violence_warning)].empty)
+
     # 5. build_bipartite_graph
     field_tables = viz.build_field_data(df, top_fandoms=20, top_additional_tags=40, min_count=2)
     graph = viz.build_bipartite_graph(field_tables, seed_tags)
@@ -295,6 +339,54 @@ def main():
     for field in viz.FIELDS_TO_VISUALIZE:
         p = os.path.join(heatmap_out_dir, f"heatmap_{field}.png")
         check(f"main() produced heatmap for {field}", os.path.exists(p))
+
+    # 8. --min-proportion CLI: mutual exclusivity and range validation.
+    # Deliberately uses "--min-count 2" -- the same value as its own default --
+    # since argparse's mutually-exclusive-group conflict detection compares
+    # the parsed value against each argument's *default*, not whether it was
+    # actually typed on the command line. If --min-count's default were still
+    # 2 (instead of None, applied later in main()), this exact case would
+    # silently NOT raise a conflict even though both flags were explicitly
+    # given -- this test would have caught that regression.
+    both_flags_result = subprocess.run(
+        [sys.executable, script_path, "--input", csv_path,
+         "--min-count", "2", "--min-proportion", "0.1",
+         "--network-out", os.path.join(tmpdir, "unused_network.html"),
+         "--heatmap-out-dir", os.path.join(tmpdir, "unused_heatmaps")],
+        capture_output=True, text=True,
+    )
+    check("passing both --min-count and --min-proportion exits nonzero",
+          both_flags_result.returncode != 0, f"stderr: {both_flags_result.stderr}")
+    check("error message names the conflicting flags",
+          "--min-proportion" in both_flags_result.stderr
+          and "--min-count" in both_flags_result.stderr,
+          f"stderr: {both_flags_result.stderr}")
+
+    bad_range_result = subprocess.run(
+        [sys.executable, script_path, "--input", csv_path, "--min-proportion", "1.5",
+         "--network-out", os.path.join(tmpdir, "unused_network2.html"),
+         "--heatmap-out-dir", os.path.join(tmpdir, "unused_heatmaps2")],
+        capture_output=True, text=True,
+    )
+    check("--min-proportion outside [0,1] exits nonzero", bad_range_result.returncode != 0)
+
+    # 9. Regression safety: omitting both flags preserves today's default behavior.
+    parser = viz.build_arg_parser()
+    default_args = parser.parse_args(["--input", csv_path])
+    check("neither flag parses to min_count=None, min_proportion=None (pre-effective-default)",
+          default_args.min_count is None and default_args.min_proportion is None)
+    if default_args.min_count is None and default_args.min_proportion is None:
+        default_args.min_count = 2
+    check("effective default resolves to min_count=2", default_args.min_count == 2)
+
+    field_tables_default = viz.build_field_data(df, top_fandoms=20, top_additional_tags=40,
+                                                 work_counts=None, min_count=2,
+                                                 min_proportion=None)
+    field_tables_old_style_call = viz.build_field_data(df, top_fandoms=20,
+                                                        top_additional_tags=40, min_count=2)
+    for field in viz.FIELDS_TO_VISUALIZE:
+        check(f"default-mode field_tables[{field}] matches old min_count=2-only call",
+              field_tables_default[field].equals(field_tables_old_style_call[field]))
 
     print()
     if FAILURES:

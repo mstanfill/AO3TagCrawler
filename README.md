@@ -186,7 +186,7 @@ each work's `rating`, `warnings`, `category`, `fandom`, and `additional_tags`. I
 | **Interactive network graph** | Bipartite graph: seed tags <-> attribute values, edges weighted by co-occurrence count. Self-contained HTML — no internet connection needed to view it |
 | **Co-occurrence heatmaps** | One per field: rows = seed tags, columns = attribute values, cell = count (or `--normalize` for %% of that tag's works) |
 | **High-cardinality filtering** | `fandom` and `additional_tags` are filtered to their top-N most frequent values overall (`--top-fandoms`, `--top-additional-tags`) before either visualization is built |
-| **Configurable thresholds** | `--min-count` drops noisy edges/cells; `--top-seed-tags` limits rows/nodes to the highest-volume seed tags |
+| **Configurable thresholds** | `--min-count` (or `--min-proportion`, mutually exclusive) drops noisy edges/cells; `--top-seed-tags` limits rows/nodes to the highest-volume seed tags |
 
 ### Output files
 
@@ -208,6 +208,11 @@ Reads `ao3_tag_metadata.csv` and writes `ao3_tag_network.html` plus
 # Adjust top-N filtering and noise threshold
 python ao3_tag_visualizer.py --top-fandoms 10 --top-additional-tags 20 --min-count 3
 
+# Alternative to --min-count: keep a (tag, value) pair only if it appears in
+# at least 10% of that seed tag's own works -- treats a low-volume tag
+# fairly instead of by raw count. Mutually exclusive with --min-count.
+python ao3_tag_visualizer.py --min-proportion 0.1
+
 # Heatmap cells as % of each seed tag's works instead of raw counts
 python ao3_tag_visualizer.py --normalize
 
@@ -222,7 +227,12 @@ python ao3_tag_visualizer.py --heatmaps-only
 --input FILE              Metadata CSV to read (default: ao3_tag_metadata.csv)
 --top-fandoms N           Keep only the top N most frequent fandoms overall (default: 20)
 --top-additional-tags N   Keep only the top N most frequent additional tags overall (default: 40)
---min-count N             Drop edges/cells below this co-occurrence count (default: 2)
+--min-count N             Drop edges/cells below this co-occurrence count (default: 2).
+                          Mutually exclusive with --min-proportion
+--min-proportion F        Alternative to --min-count: drop a (seed tag, value) edge/cell
+                          below this fraction (0.0-1.0) of that seed tag's total works
+                          (default: disabled, --min-count applies instead). Mutually
+                          exclusive with --min-count
 --top-seed-tags N         Only include the N seed tags with the most works (default: all)
 --network-out FILE        Interactive network HTML output (default: ao3_tag_network.html)
 --heatmap-out-dir DIR     Directory for heatmap PNGs (default: heatmaps)
