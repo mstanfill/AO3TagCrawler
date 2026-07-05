@@ -557,8 +557,6 @@ def build_arg_parser():
                          help="Interactive network HTML output (default: ao3_tag_network.html)")
     parser.add_argument("--heatmap-out-dir", default="heatmaps",
                          help="Directory for heatmap PNGs (default: heatmaps)")
-    parser.add_argument("--normalize", action="store_true",
-                         help="Heatmap cells show %% of seed tag's works instead of raw counts")
     parser.add_argument("--network-only", action="store_true",
                          help="Only build the network, skip heatmaps")
     parser.add_argument("--heatmaps-only", action="store_true",
@@ -598,11 +596,10 @@ def main(argv=None):
     df = load_metadata(args.input)
     seed_tags = rank_seed_tags(df, args.top_seed_tags)
 
-    # Shared once between the --normalize display path and the
-    # --min-proportion filter path, since both need the same per-tag total
-    # work counts, regardless of which (or both, or neither) is active.
-    need_work_counts = args.normalize or (args.min_proportion is not None)
-    work_counts = df["tag"].value_counts() if need_work_counts else None
+    # Needed unconditionally: heatmap cells are always colored/labeled by
+    # percentage of each seed tag's works (not raw count), and --min-proportion
+    # filtering needs the same per-tag totals when active.
+    work_counts = df["tag"].value_counts()
 
     field_tables = build_field_data(df, args.top_fandoms, args.top_additional_tags,
                                      work_counts=work_counts,
@@ -618,10 +615,9 @@ def main(argv=None):
         print("Building heatmaps")
         os.makedirs(args.heatmap_out_dir, exist_ok=True)
         for field, counts in field_tables.items():
-            matrix = cooccurrence_matrix(counts, field, seed_tags,
-                                          normalize_by=work_counts if args.normalize else None)
+            matrix = cooccurrence_matrix(counts, field, seed_tags, normalize_by=work_counts)
             out_path = os.path.join(args.heatmap_out_dir, f"heatmap_{field}.png")
-            render_heatmap(matrix, field, out_path, normalized=args.normalize)
+            render_heatmap(matrix, field, out_path, normalized=True)
 
 
 if __name__ == "__main__":
