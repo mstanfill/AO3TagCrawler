@@ -106,6 +106,18 @@ def apply_min_count(counts, min_count):
     return counts[counts["count"] >= min_count]
 
 
+def apply_min_proportion(counts, work_counts, min_proportion):
+    """Alternative to apply_min_count: keeps a (tag, value) pair only if it
+    appears in at least min_proportion (0.0-1.0) of that seed tag's own
+    total works, rather than by a raw absolute count. work_counts is
+    df["tag"].value_counts() -- every tag in `counts` is guaranteed present
+    in it (both are derived from the same df), so no zero-division guard
+    is needed; an empty `counts` flows through unchanged, same as
+    apply_min_count."""
+    denom = counts["tag"].map(work_counts)
+    return counts[(counts["count"] / denom) >= min_proportion]
+
+
 def rank_seed_tags(df, top_seed_tags):
     ranked = df["tag"].value_counts().index.tolist()
     if top_seed_tags is None:
@@ -504,6 +516,13 @@ def render_network(graph, out_path, notebook=False):
 # CLI
 # ---------------------------------------------------------------------------
 
+def _proportion_type(value):
+    f = float(value)
+    if not (0.0 <= f <= 1.0):
+        raise argparse.ArgumentTypeError(f"must be between 0.0 and 1.0 (got {value!r})")
+    return f
+
+
 def build_arg_parser():
     parser = argparse.ArgumentParser(
         description="Visualize connections between seed tags and work attributes.",
@@ -514,8 +533,24 @@ def build_arg_parser():
                          help="Keep only the top N most frequent fandoms overall (default: 20)")
     parser.add_argument("--top-additional-tags", type=int, default=40,
                          help="Keep only the top N most frequent additional tags overall (default: 40)")
-    parser.add_argument("--min-count", type=int, default=2,
-                         help="Drop edges/cells below this co-occurrence count (default: 2)")
+    count_group = parser.add_mutually_exclusive_group()
+    # default=None (not 2) here is deliberate: argparse's mutually exclusive
+    # group only flags a conflict when a value differs from that argument's
+    # own default, not based on whether it was actually typed on the command
+    # line -- with default=2, explicitly passing "--min-count 2
+    # --min-proportion 0.1" would silently NOT raise a conflict (2 == its own
+    # default), even though both were given. The effective default of 2 is
+    # applied after parsing instead (see main()).
+    count_group.add_argument("--min-count", type=int, default=None,
+                              help="Drop edges/cells below this co-occurrence count "
+                                   "(default: 2). Mutually exclusive with --min-proportion")
+    count_group.add_argument("--min-proportion", type=_proportion_type, default=None,
+                              help="Alternative to --min-count: drop a (seed tag, value) "
+                                   "edge/cell if its co-occurrence count is below this "
+                                   "fraction (0.0-1.0) of that seed tag's total works, e.g. "
+                                   "0.1 keeps only values appearing in at least 10%% of the "
+                                   "tag's works (default: disabled, --min-count applies "
+                                   "instead). Mutually exclusive with --min-count")
     parser.add_argument("--top-seed-tags", type=int, default=None,
                          help="Only include the N seed tags with the most works (default: all)")
     parser.add_argument("--network-out", default="ao3_tag_network.html",
@@ -531,8 +566,13 @@ def build_arg_parser():
     return parser
 
 
-def build_field_data(df, top_fandoms, top_additional_tags, min_count):
-    """Returns {field: filtered co-occurrence counts DataFrame} for FIELDS_TO_VISUALIZE."""
+def build_field_data(df, top_fandoms, top_additional_tags, work_counts=None,
+                      min_count=None, min_proportion=None):
+    """Returns {field: filtered co-occurrence counts DataFrame} for FIELDS_TO_VISUALIZE.
+    Exactly one of min_count/min_proportion is expected to be non-None -- the
+    caller (main()'s mutually exclusive CLI flags, or the notebook's own
+    assertion) is responsible for that. work_counts (df["tag"].value_counts())
+    is required when min_proportion is used."""
     top_n_by_field = {"fandom": top_fandoms, "additional_tags": top_additional_tags}
     field_tables = {}
     for field in FIELDS_TO_VISUALIZE:
@@ -540,7 +580,10 @@ def build_field_data(df, top_fandoms, top_additional_tags, min_count):
         n = top_n_by_field.get(field) if field in FIELDS_TOP_N_ELIGIBLE else None
         keep_values = top_n_values(exploded, field, n)
         counts = cooccurrence_counts(exploded, field, keep_values)
-        counts = apply_min_count(counts, min_count)
+        if min_proportion is not None:
+            counts = apply_min_proportion(counts, work_counts, min_proportion)
+        else:
+            counts = apply_min_count(counts, min_count)
         field_tables[field] = counts
     return field_tables
 
@@ -548,11 +591,23 @@ def build_field_data(df, top_fandoms, top_additional_tags, min_count):
 def main(argv=None):
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    if args.min_count is None and args.min_proportion is None:
+        args.min_count = 2  # effective default, applied here rather than in
+                            # argparse itself -- see build_arg_parser()
 
     df = load_metadata(args.input)
     seed_tags = rank_seed_tags(df, args.top_seed_tags)
 
-    field_tables = build_field_data(df, args.top_fandoms, args.top_additional_tags, args.min_count)
+    # Shared once between the --normalize display path and the
+    # --min-proportion filter path, since both need the same per-tag total
+    # work counts, regardless of which (or both, or neither) is active.
+    need_work_counts = args.normalize or (args.min_proportion is not None)
+    work_counts = df["tag"].value_counts() if need_work_counts else None
+
+    field_tables = build_field_data(df, args.top_fandoms, args.top_additional_tags,
+                                     work_counts=work_counts,
+                                     min_count=args.min_count,
+                                     min_proportion=args.min_proportion)
 
     if not args.heatmaps_only:
         print("Building network graph")
@@ -562,9 +617,9 @@ def main(argv=None):
     if not args.network_only:
         print("Building heatmaps")
         os.makedirs(args.heatmap_out_dir, exist_ok=True)
-        work_counts = df["tag"].value_counts() if args.normalize else None
         for field, counts in field_tables.items():
-            matrix = cooccurrence_matrix(counts, field, seed_tags, normalize_by=work_counts)
+            matrix = cooccurrence_matrix(counts, field, seed_tags,
+                                          normalize_by=work_counts if args.normalize else None)
             out_path = os.path.join(args.heatmap_out_dir, f"heatmap_{field}.png")
             render_heatmap(matrix, field, out_path, normalized=args.normalize)
 
