@@ -187,6 +187,7 @@ each work's `rating`, `warnings`, `category`, `fandom`, and `additional_tags`. I
 | **Co-occurrence heatmaps** | One per field: rows = seed tags, columns = attribute values, cell (color and displayed number) = %% of that seed tag's works |
 | **High-cardinality filtering** | `fandom` and `additional_tags` are filtered to their top-N most frequent values overall (`--top-fandoms`, `--top-additional-tags`) before either visualization is built |
 | **Configurable thresholds** | `--min-count` (or `--min-proportion`, mutually exclusive) drops noisy edges/cells; `--top-seed-tags` limits rows/nodes to the highest-volume seed tags |
+| **Tag-pair co-occurrence (opt-in)** | `--tag-pairs` computes statistical lift/PMI between pairs of `fandom`/`relationship`/`character`/`additional_tags` tags across the whole dataset — which pairs co-occur more or less than chance — and renders a second network graph + heatmap |
 
 ### Output files
 
@@ -194,6 +195,9 @@ each work's `rating`, `warnings`, `category`, `fandom`, and `additional_tags`. I
 
 **`heatmaps/heatmap_<field>.png`** — one PNG per field in `rating`, `warnings`,
 `category`, `fandom`, `additional_tags`
+
+**`ao3_tag_pair_network.html`** / **`heatmaps/heatmap_tag_pairs.png`** — only written
+with `--tag-pairs`: tag-to-tag network graph and heatmap of lift/PMI values
 
 ### Usage
 
@@ -216,7 +220,35 @@ python ao3_tag_visualizer.py --min-proportion 0.1
 # Only the network, or only the heatmaps
 python ao3_tag_visualizer.py --network-only
 python ao3_tag_visualizer.py --heatmaps-only
+
+# Also compute tag-pair co-occurrence (lift/PMI) across fandom/relationship/
+# character/additional_tags -- which pairs of tags co-occur statistically more
+# or less than chance. Off by default (a full pairwise computation would
+# otherwise slow down every run); --network-only/--heatmaps-only apply to
+# these outputs too.
+python ao3_tag_visualizer.py --tag-pairs
+
+# Adjust the tag-pair thresholds: only the top 60 tags by document frequency,
+# require at least 5 co-occurrences, and widen the "most/least likely" bands
+python ao3_tag_visualizer.py --tag-pairs --top-tags 60 --min-pair-count 5 --min-pmi 1.5 --max-pmi -1.5
 ```
+
+`--tag-pairs` answers a different question than the rest of this tool: not "which
+attribute values does a seed tag associate with", but "which pairs of tags -- pooled
+across `fandom`/`relationship`/`character`/`additional_tags` -- statistically tend to
+co-occur (or avoid each other) more than chance would predict". Raw co-occurrence
+counts conflate "both tags are individually common" with "these two tags are actually
+associated"; lift and PMI correct for that:
+
+- `lift(A, B) = P(A, B) / (P(A) * P(B))`
+- `pmi(A, B) = log2(lift(A, B))`
+
+`pmi > 0` means the pair co-occurs *more* than chance ("most likely"), `pmi < 0` means
+*less* than chance ("least likely"), `pmi == 0` means independence. `--min-pmi` and
+`--max-pmi` are two independently adjustable thresholds -- one per tail -- that drop
+the "boring middle" near independence; `--min-pair-count` runs first and filters out
+low-sample coincidences (e.g. two tags that only ever appear together on a single
+work) whose lift would otherwise look enormous but isn't statistically meaningful.
 
 ### All options
 
@@ -235,6 +267,17 @@ python ao3_tag_visualizer.py --heatmaps-only
 --heatmap-out-dir DIR     Directory for heatmap PNGs (default: heatmaps)
 --network-only            Only build the network, skip heatmaps
 --heatmaps-only           Only build heatmaps, skip the network
+--tag-pairs               Also compute/render tag-pair co-occurrence statistics
+                          (lift/PMI) across fandom/relationship/character/
+                          additional_tags (default: off)
+--top-tags N              Top N tags overall, by document frequency (default: 40)
+--min-pair-count N        Drop pairs with fewer co-occurrences than this (default: 2)
+--min-pmi F               "Most likely" threshold: keep pairs with pmi >= this (default: 1.0)
+--max-pmi F               "Least likely" threshold: keep pairs with pmi <= this (default: -1.0)
+--tag-pair-network-out FILE    Tag-pair network HTML output
+                                (default: ao3_tag_pair_network.html)
+--tag-pair-heatmap-out FILE    Tag-pair heatmap PNG output
+                                (default: heatmaps/heatmap_tag_pairs.png)
 -h, --help
 ```
 
