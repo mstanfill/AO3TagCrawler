@@ -184,7 +184,7 @@ each work's `rating`, `warnings`, `category`, `fandom`, and `additional_tags`. I
 | Feature | Detail |
 |---|---|
 | **Interactive network graph** | Bipartite graph: seed tags <-> attribute values, edges weighted by co-occurrence count. Self-contained HTML — no internet connection needed to view it |
-| **Co-occurrence heatmaps** | One per field: rows = seed tags, columns = attribute values, cell = count (or `--normalize` for %% of that tag's works) |
+| **Co-occurrence heatmaps** | One per field: rows = seed tags, columns = attribute values, cell (color and displayed number) = %% of that seed tag's works |
 | **High-cardinality filtering** | `fandom` and `additional_tags` are filtered to their top-N most frequent values overall (`--top-fandoms`, `--top-additional-tags`) before either visualization is built |
 | **Configurable thresholds** | `--min-count` (or `--min-proportion`, mutually exclusive) drops noisy edges/cells; `--top-seed-tags` limits rows/nodes to the highest-volume seed tags |
 
@@ -213,9 +213,6 @@ python ao3_tag_visualizer.py --top-fandoms 10 --top-additional-tags 20 --min-cou
 # fairly instead of by raw count. Mutually exclusive with --min-count.
 python ao3_tag_visualizer.py --min-proportion 0.1
 
-# Heatmap cells as % of each seed tag's works instead of raw counts
-python ao3_tag_visualizer.py --normalize
-
 # Only the network, or only the heatmaps
 python ao3_tag_visualizer.py --network-only
 python ao3_tag_visualizer.py --heatmaps-only
@@ -236,7 +233,6 @@ python ao3_tag_visualizer.py --heatmaps-only
 --top-seed-tags N         Only include the N seed tags with the most works (default: all)
 --network-out FILE        Interactive network HTML output (default: ao3_tag_network.html)
 --heatmap-out-dir DIR     Directory for heatmap PNGs (default: heatmaps)
---normalize               Heatmap cells show %% of seed tag's works instead of raw counts
 --network-only            Only build the network, skip heatmaps
 --heatmaps-only           Only build heatmaps, skip the network
 -h, --help

@@ -321,6 +321,26 @@ def main():
             check(f"{field} heatmap respects top-N column cap",
                   matrix.shape[1] <= expected_cols, f"got {matrix.shape[1]}")
 
+    # 6b. Heatmaps color/label by percentage of each seed tag's works by
+    # default now (no --normalize flag needed) -- confirm with a known cell:
+    # Found Family has exactly 1 work, rated "Mature", so its normalized
+    # rating matrix cell must be 100.0 (1/1 * 100), not the raw count 1.
+    # Uses unfiltered counts (not field_tables["rating"], which is already
+    # min_count=2-filtered and would drop Found Family's count=1 pair before
+    # normalization ever ran -- the same reason the earlier min-count test
+    # needed unfiltered warnings_counts too).
+    rating_exploded = viz.explode_field(df, "rating")
+    rating_counts_unfiltered = viz.cooccurrence_counts(rating_exploded, "rating", None)
+    rating_matrix_normalized = viz.cooccurrence_matrix(
+        rating_counts_unfiltered, "rating", seed_tags, normalize_by=work_counts)
+    check("Found Family x Mature normalizes to 100.0%",
+          rating_matrix_normalized.loc["Found Family", "Mature"] == 100.0,
+          f"got {rating_matrix_normalized.loc['Found Family', 'Mature']}")
+    rating_matrix_raw = viz.cooccurrence_matrix(rating_counts_unfiltered, "rating", seed_tags)
+    check("...vs. raw count of 1 (sanity check the two modes actually differ)",
+          rating_matrix_raw.loc["Found Family", "Mature"] == 1,
+          f"got {rating_matrix_raw.loc['Found Family', 'Mature']}")
+
     # 7. Full main() invocation via subprocess
     out_dir = os.path.join(tmpdir, "full_run")
     os.makedirs(out_dir, exist_ok=True)
