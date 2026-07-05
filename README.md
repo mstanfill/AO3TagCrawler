@@ -174,6 +174,70 @@ VS Code, JupyterLab, or Classic Jupyter. Edit the Configuration cell to set
 > All Cells**. Stale function definitions from a previous run persist in memory until
 > the kernel is restarted.
 
+## Visualization
+
+`ao3_tag_visualizer.py` (and its notebook twin, `ao3_tag_visualizer.ipynb`) reads an
+existing `ao3_tag_metadata.csv` and visualizes connections between the seed tag and
+each work's `rating`, `warnings`, `category`, `fandom`, and `additional_tags`. It has
+**no network dependency** — it only reads a local CSV.
+
+| Feature | Detail |
+|---|---|
+| **Interactive network graph** | Bipartite graph: seed tags <-> attribute values, edges weighted by co-occurrence count. Self-contained HTML — no internet connection needed to view it |
+| **Co-occurrence heatmaps** | One per field: rows = seed tags, columns = attribute values, cell = count (or `--normalize` for %% of that tag's works) |
+| **High-cardinality filtering** | `fandom` and `additional_tags` are filtered to their top-N most frequent values overall (`--top-fandoms`, `--top-additional-tags`) before either visualization is built |
+| **Configurable thresholds** | `--min-count` drops noisy edges/cells; `--top-seed-tags` limits rows/nodes to the highest-volume seed tags |
+
+### Output files
+
+**`ao3_tag_network.html`** — self-contained interactive network graph (pan/zoom/drag/hover)
+
+**`heatmaps/heatmap_<field>.png`** — one PNG per field in `rating`, `warnings`,
+`category`, `fandom`, `additional_tags`
+
+### Usage
+
+```bash
+python ao3_tag_visualizer.py
+```
+
+Reads `ao3_tag_metadata.csv` and writes `ao3_tag_network.html` plus
+`heatmaps/heatmap_<field>.png` for each field.
+
+```bash
+# Adjust top-N filtering and noise threshold
+python ao3_tag_visualizer.py --top-fandoms 10 --top-additional-tags 20 --min-count 3
+
+# Heatmap cells as % of each seed tag's works instead of raw counts
+python ao3_tag_visualizer.py --normalize
+
+# Only the network, or only the heatmaps
+python ao3_tag_visualizer.py --network-only
+python ao3_tag_visualizer.py --heatmaps-only
+```
+
+### All options
+
+```
+--input FILE              Metadata CSV to read (default: ao3_tag_metadata.csv)
+--top-fandoms N           Keep only the top N most frequent fandoms overall (default: 20)
+--top-additional-tags N   Keep only the top N most frequent additional tags overall (default: 40)
+--min-count N             Drop edges/cells below this co-occurrence count (default: 2)
+--top-seed-tags N         Only include the N seed tags with the most works (default: all)
+--network-out FILE        Interactive network HTML output (default: ao3_tag_network.html)
+--heatmap-out-dir DIR     Directory for heatmap PNGs (default: heatmaps)
+--normalize               Heatmap cells show %% of seed tag's works instead of raw counts
+--network-only            Only build the network, skip heatmaps
+--heatmaps-only           Only build heatmaps, skip the network
+-h, --help
+```
+
+### Notebook
+
+`ao3_tag_visualizer.ipynb` is a Jupyter notebook version of the same tool, structured
+like `ao3_tag_scraper.ipynb` — edit the Configuration cell, then run all cells in
+order. The network graph and heatmaps render inline in addition to being saved to disk.
+
 ## AO3 terms of service
 
 AO3 asks that scraping tools wait between requests to avoid overloading their
