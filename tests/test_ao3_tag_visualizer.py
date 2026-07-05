@@ -246,7 +246,8 @@ def main():
     # own injected call signature (network.setOptions({ physics: false }))
     # instead, which vis-network's own minified code won't happen to match.
     check("stabilization listener present", "stabilizationIterationsDone" in html)
-    check("avoidOverlap configured", "avoidOverlap: 1" in html)
+    check("avoidOverlap configured", '"avoidOverlap": 0.5' in html)
+    check("improvedLayout disabled", '"improvedLayout": false' in html)
     check("stabilize-then-stop script injected exactly once",
           html.count("network.setOptions({ physics: false })") == 1)
 
