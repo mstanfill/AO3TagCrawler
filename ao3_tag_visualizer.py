@@ -799,8 +799,9 @@ def tag_pair_statistics(incidence, n_docs):
     call (never assigned -inf) -- they carry no real co-occurrence signal.
 
     Returns a long DataFrame [tag_a, tag_b, joint_count, count_a, count_b,
-    lift, pmi], one row per unordered pair with tag_a < tag_b, joint_count
-    > 0.
+    lift, pmi], one row per unordered pair with tag_a < tag_b (enforced by
+    this function itself, below -- not merely inherited from the caller's
+    column order), joint_count > 0.
     """
     tags = list(incidence.columns)
     values = incidence.to_numpy(dtype=np.int64)
@@ -817,12 +818,29 @@ def tag_pair_statistics(incidence, n_docs):
     lift = (joint_counts * n_docs) / (count_a * count_b)
     pmi = np.log2(lift)
 
+    # Explicit canonicalization: tag_a is always the alphabetically-smaller
+    # of the pair, regardless of the incidence matrix's own column order --
+    # np.triu_indices above only guarantees i < j by column *position*, not
+    # by alphabetical value. This used to be true only as an incidental side
+    # effect of build_tag_incidence_matrix always pre-sorting its columns;
+    # enforcing it here means the guarantee holds for any caller, not just
+    # today's one. lift/pmi are symmetric in count_a/count_b already, so
+    # only the names and their paired counts need to swap together.
+    tags_arr = np.array(tags)
+    a_names = tags_arr[i_idx]
+    b_names = tags_arr[j_idx]
+    swap = a_names > b_names
+    tag_a = np.where(swap, b_names, a_names)
+    tag_b = np.where(swap, a_names, b_names)
+    count_a_final = np.where(swap, count_b, count_a)
+    count_b_final = np.where(swap, count_a, count_b)
+
     return pd.DataFrame({
-        "tag_a": [tags[i] for i in i_idx],
-        "tag_b": [tags[j] for j in j_idx],
+        "tag_a": tag_a,
+        "tag_b": tag_b,
         "joint_count": joint_counts,
-        "count_a": count_a,
-        "count_b": count_b,
+        "count_a": count_a_final,
+        "count_b": count_b_final,
         "lift": lift,
         "pmi": pmi,
     })
