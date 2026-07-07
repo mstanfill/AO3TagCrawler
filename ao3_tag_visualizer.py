@@ -26,6 +26,7 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 import pandas as pd
+import scipy.sparse as sp
 import seaborn as sns
 from pyvis.network import Network
 
@@ -786,10 +787,18 @@ def build_tag_incidence_matrix(tag_table, keep_tags):
 
 def tag_pair_statistics(incidence, n_docs):
     """Fully vectorized pairwise lift/PMI -- no nested Python loop over
-    pairs. joint = incidence.T @ incidence gives the whole tags x tags
-    co-occurrence matrix in one matmul; its diagonal is each tag's own
-    total document count (marginal). n_docs must be the TRUE total document
-    count (df["work_id"].nunique() on the original, undeduplicated df --
+    pairs, and no dense tags x tags matrix either: joint = incidence.T @
+    incidence is computed in SciPy sparse space, since real tag pools can
+    be tens of thousands of tags wide (--all-tags), where a dense tags x
+    tags matrix would need tens of gigabytes even though the overwhelming
+    majority of tag pairs never co-occur (e.g. 81,037 tags -> 6.6 billion
+    cells -> 48.9 GiB just for that one array, which is exactly the
+    MemoryError this sparse rewrite fixes). incidence itself (documents x
+    tags) is still densified once via to_numpy() -- that side stays
+    proportional to corpus size, not tag-count squared, and was never the
+    actual bottleneck. joint's diagonal is each tag's own total document
+    count (marginal). n_docs must be the TRUE total document count
+    (df["work_id"].nunique() on the original, undeduplicated df --
     nunique() already ignores duplicate rows), never incidence.shape[0]
     (see build_tag_incidence_matrix) -- using the latter would silently
     undercount the corpus and skew every lift/PMI value.
@@ -804,12 +813,15 @@ def tag_pair_statistics(incidence, n_docs):
     column order), joint_count > 0.
     """
     tags = list(incidence.columns)
-    values = incidence.to_numpy(dtype=np.int64)
+    values = sp.csr_matrix(incidence.to_numpy(dtype=np.int64))
     joint = values.T @ values
-    marginal = np.diag(joint)
+    marginal = np.asarray(joint.diagonal()).ravel()
 
-    i_idx, j_idx = np.triu_indices(len(tags), k=1)
-    joint_counts = joint[i_idx, j_idx]
+    # scipy.sparse.triu only stores the upper triangle's nonzero entries --
+    # equivalent to np.triu_indices(k=1) on the dense matrix, but without
+    # ever materializing the full tags x tags array to get there.
+    upper = sp.triu(joint, k=1).tocoo()
+    i_idx, j_idx, joint_counts = upper.row, upper.col, upper.data
     nonzero = joint_counts > 0
     i_idx, j_idx, joint_counts = i_idx[nonzero], j_idx[nonzero], joint_counts[nonzero]
 
