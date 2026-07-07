@@ -149,13 +149,26 @@ def compute_linkage(fill_matrix, method="average"):
     return linkage(distances, method=method)
 
 
-def cut_clusters(linkage_matrix, tags, n_clusters):
-    """Cuts the dendrogram into n_clusters discrete groups via
-    scipy.cluster.hierarchy.fcluster. Returns a DataFrame
-    [tag_id, field, label, cluster_id] sorted by (cluster_id, tag_id).
-    field/label are recovered by splitting tag_id on "::", the same trick
-    viz.build_tag_pair_graph already uses."""
-    cluster_ids = fcluster(linkage_matrix, t=n_clusters, criterion="maxclust")
+def cut_clusters(linkage_matrix, tags, n_clusters, min_cluster_size=1):
+    """Cuts the dendrogram into up to n_clusters discrete groups via
+    scipy.cluster.hierarchy.fcluster. n_clusters is a ceiling, not a fixed
+    target, when min_cluster_size > 1: walks k down from
+    min(n_clusters, len(tags)) to 1, taking the largest k where every
+    resulting cluster has at least min_cluster_size tags. Always falls
+    back to k=1 (everything in one cluster) if no larger k satisfies the
+    floor -- a single cluster trivially satisfies any floor <= len(tags),
+    and there's nothing smaller to fall back to if min_cluster_size itself
+    exceeds len(tags). Returns a DataFrame [tag_id, field, label,
+    cluster_id] sorted by (cluster_id, tag_id). field/label are recovered
+    by splitting tag_id on "::", the same trick viz.build_tag_pair_graph
+    already uses."""
+    cluster_ids = None
+    for k in range(min(n_clusters, len(tags)), 0, -1):
+        candidate = fcluster(linkage_matrix, t=k, criterion="maxclust")
+        if k == 1 or pd.Series(candidate).value_counts().min() >= min_cluster_size:
+            cluster_ids = candidate
+            break
+
     rows = []
     for tag_id, cluster_id in zip(tags, cluster_ids):
         field, _, label = tag_id.partition("::")
@@ -214,15 +227,23 @@ def build_arg_parser():
 
     parser.add_argument("--top-tags", type=int, default=60,
                          help="Top N tags overall, pooled across all 7 metadata "
-                              "fields, by document frequency, before clustering "
-                              "(default: 60)")
+                              "fields, by document frequency, before clustering. "
+                              "Overridden by --all-tags (default: 60)")
+    parser.add_argument("--all-tags", action="store_true",
+                         help="Cluster using every tag from all 7 metadata fields, "
+                              "ignoring --top-tags (default: off)")
     parser.add_argument("--min-pair-count", type=int, default=2,
                          help="Drop pairs co-occurring fewer than this many times "
                               "before clustering -- lift/PMI is unreliable at tiny "
                               "sample sizes (default: 2)")
     parser.add_argument("--n-clusters", type=int, default=10,
-                         help="Cut the dendrogram into this many discrete clusters "
-                              "(default: 10)")
+                         help="Cut the dendrogram into up to this many discrete "
+                              "clusters -- a ceiling rather than a fixed target when "
+                              "--min-cluster-size is set (default: 10)")
+    parser.add_argument("--min-cluster-size", type=int, default=1,
+                         help="Merge/reduce clusters smaller than this; --n-clusters "
+                              "becomes a ceiling rather than a fixed target when this "
+                              "is > 1 (default: 1, no minimum)")
     parser.add_argument("--cluster-method", choices=CLUSTER_METHODS, default="average",
                          help="scipy linkage method (default: average)")
     parser.add_argument("--heatmap-out-dir", default="heatmaps",
@@ -259,8 +280,12 @@ def main(argv=None):
 
     if not args.frequency_only:
         print("Building cross-field hierarchical clustering")
+        if args.all_tags:
+            print("  --all-tags set: pooling every tag (no top-N truncation) -- "
+                  "this may be slow/large on bigger datasets", file=sys.stderr)
+        top_tags = None if args.all_tags else args.top_tags
         pair_stats, keep_tags = build_all_fields_pair_data(
-            df, args.top_tags, args.min_pair_count)
+            df, top_tags, args.min_pair_count)
         display_matrix, fill_matrix = build_cluster_matrix(pair_stats, keep_tags)
         linkage_matrix = compute_linkage(fill_matrix, method=args.cluster_method)
 
@@ -271,7 +296,7 @@ def main(argv=None):
 
         if linkage_matrix is not None:
             clusters_df = cut_clusters(linkage_matrix, list(fill_matrix.index),
-                                        args.n_clusters)
+                                        args.n_clusters, args.min_cluster_size)
             clusters_df.to_csv(args.clusters_out, index=False)
             print(f"  wrote {args.clusters_out} ({len(clusters_df)} tags, "
                   f"{clusters_df['cluster_id'].nunique()} clusters)")

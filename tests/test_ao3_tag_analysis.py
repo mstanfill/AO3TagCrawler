@@ -212,6 +212,8 @@ def run_frequency_checks(tmpdir, script_path):
     check("--n-clusters defaults to 10", default_args.n_clusters == 10)
     check("--cluster-method defaults to average", default_args.cluster_method == "average")
     check("--cluster-heatmap-out defaults to None", default_args.cluster_heatmap_out is None)
+    check("--all-tags defaults to False", default_args.all_tags is False)
+    check("--min-cluster-size defaults to 1", default_args.min_cluster_size == 1)
     check("--frequency-only defaults to False", default_args.frequency_only is False)
     check("--clusters-only defaults to False", default_args.clusters_only is False)
 
@@ -309,6 +311,14 @@ def run_clustering_checks(tmpdir, script_path):
     check("--top-tags 8 keeps the expected 8 tags (alphabetical tie-break)",
           keep_tags8 == expected_top8, f"got {keep_tags8}")
 
+    # --all-tags: top_tags=None keeps every tag in the pool, not just the
+    # top-K by document frequency (this Python-level path was previously
+    # unreachable from the CLI, since --top-tags was numeric-only).
+    pair_stats_all, keep_tags_all = analysis.build_all_fields_pair_data(
+        df, top_tags=None, min_pair_count=2)
+    check("top_tags=None (--all-tags) keeps all 14 tags",
+          keep_tags_all == all_tags, f"got {keep_tags_all}")
+
     # NaN handling: display_matrix has NaN (block A / block B never
     # co-occur), fill_matrix does not (scipy linkage can't handle NaN).
     display_matrix, fill_matrix = analysis.build_cluster_matrix(pair_stats8, keep_tags8)
@@ -371,6 +381,73 @@ def run_clustering_checks(tmpdir, script_path):
           and cli_a_cluster_ids != cli_b_cluster_ids,
           f"block A cluster ids: {cli_a_cluster_ids}, block B cluster ids: {cli_b_cluster_ids}")
 
+    # --all-tags CLI run: every kept tag gets a row, including RareThing
+    # (zero surviving pairs, per the existing "Found Family stays as an
+    # all-zero row" precedent for tag_pair_matrix).
+    all_tags_dir = os.path.join(tmpdir, "all_tags_run")
+    os.makedirs(all_tags_dir, exist_ok=True)
+    all_tags_clusters_out = os.path.join(all_tags_dir, "clusters.csv")
+    result_all_tags = subprocess.run(
+        [sys.executable, script_path, "--input", csv_path, "--clusters-only", "--all-tags",
+         "--heatmap-out-dir", os.path.join(all_tags_dir, "heatmaps"),
+         "--clusters-out", all_tags_clusters_out],
+        capture_output=True, text=True,
+    )
+    check("main() --all-tags exits 0", result_all_tags.returncode == 0,
+          f"stderr: {result_all_tags.stderr}")
+    with open(all_tags_clusters_out, newline="", encoding="utf-8") as f:
+        all_tags_rows = list(csv.DictReader(f))
+    check("--all-tags CLI run includes all 14 tags in the clusters CSV",
+          {row["tag_id"] for row in all_tags_rows} == all_tags,
+          f"got {len(all_tags_rows)} rows: {[row['tag_id'] for row in all_tags_rows]}")
+
+
+def run_min_cluster_size_checks():
+    # Direct unit-level test of cut_clusters against a hand-built
+    # fill_matrix, bypassing the CSV/incidence pipeline entirely -- same
+    # strategy as the order-independence test in
+    # tests/test_ao3_tag_visualizer.py. Ten synthetic tags in three
+    # designed blocks: X (4 tags), Y (4 tags), Z (2 tags), every
+    # within-block pair given the same association value, every
+    # cross-block pair 0.
+    tags = ["X1", "X2", "X3", "X4", "Y1", "Y2", "Y3", "Y4", "Z1", "Z2"]
+    value = 3.0
+    matrix = analysis.pd.DataFrame(0.0, index=tags, columns=tags)
+    for group in [["X1", "X2", "X3", "X4"], ["Y1", "Y2", "Y3", "Y4"], ["Z1", "Z2"]]:
+        for a in group:
+            for b in group:
+                if a != b:
+                    matrix.loc[a, b] = value
+    linkage_matrix = analysis.compute_linkage(matrix, method="average")
+
+    # Without a minimum, n_clusters=3 recovers the 3 designed blocks,
+    # including the small 2-tag Z block.
+    clusters_no_min = analysis.cut_clusters(linkage_matrix, tags, n_clusters=3,
+                                             min_cluster_size=1)
+    sizes_no_min = sorted(clusters_no_min["cluster_id"].value_counts().tolist())
+    check("without min_cluster_size, n_clusters=3 recovers block sizes [2,4,4]",
+          sizes_no_min == [2, 4, 4], f"got {sizes_no_min}")
+
+    # With min_cluster_size=3, the 2-tag Z block can't stand on its own --
+    # n_clusters acts as a ceiling, not a fixed target, and the actual cut
+    # falls back to fewer, larger clusters.
+    clusters_min3 = analysis.cut_clusters(linkage_matrix, tags, n_clusters=3,
+                                           min_cluster_size=3)
+    sizes_min3 = clusters_min3["cluster_id"].value_counts().tolist()
+    check("min_cluster_size=3 forces fewer than 3 clusters (ceiling, not fixed target)",
+          clusters_min3["cluster_id"].nunique() < 3,
+          f"got {clusters_min3['cluster_id'].nunique()} clusters, sizes {sizes_min3}")
+    check("every resulting cluster meets the minimum size",
+          min(sizes_min3) >= 3, f"got sizes {sizes_min3}")
+
+    # An impossible constraint (min_cluster_size larger than the total tag
+    # count) falls back to a single cluster without erroring.
+    clusters_impossible = analysis.cut_clusters(linkage_matrix, tags, n_clusters=3,
+                                                 min_cluster_size=100)
+    check("min_cluster_size larger than total tags falls back to a single cluster",
+          clusters_impossible["cluster_id"].nunique() == 1,
+          f"got {clusters_impossible['cluster_id'].nunique()} clusters")
+
 
 def main():
     tmpdir = tempfile.mkdtemp(prefix="ao3_analysis_test_")
@@ -379,6 +456,7 @@ def main():
 
     run_frequency_checks(tmpdir, script_path)
     run_clustering_checks(tmpdir, script_path)
+    run_min_cluster_size_checks()
 
     print()
     if FAILURES:
