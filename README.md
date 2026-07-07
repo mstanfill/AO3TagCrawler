@@ -287,6 +287,101 @@ work) whose lift would otherwise look enormous but isn't statistically meaningfu
 like `ao3_tag_scraper.ipynb` — edit the Configuration cell, then run all cells in
 order. The network graph and heatmaps render inline in addition to being saved to disk.
 
+## Tag Analysis
+
+`ao3_tag_analysis.py` (and its notebook twin, `ao3_tag_analysis.ipynb`) reads an
+existing `ao3_tag_metadata.csv` and runs two further analyses, beyond
+`ao3_tag_visualizer.py`'s bipartite network and tag-pair lift/PMI network. It has
+**no network dependency** — it only reads a local CSV.
+
+| Feature | Detail |
+|---|---|
+| **additional_tags frequency ranking** | Which `additional_tags` values are most common, and which are least common (excluding one-off singletons) |
+| **Cross-field hierarchical clustering** | Pools labels from *all* metadata fields (`rating`, `warnings`, `category`, `fandom`, `relationship`, `character`, `additional_tags`) and clusters them by lift/PMI similarity — which labels of any kind tend to appear together — rendered as a dendrogram + reordered heatmap plus a discrete cluster-membership CSV |
+
+Both analyses run by default; `--frequency-only`/`--clusters-only` narrow it to one.
+
+### Output files
+
+**`ao3_additional_tags_frequency.csv`** — the N most and N least frequent
+`additional_tags` values, each row tagged `most_frequent`/`least_frequent`
+
+**`heatmaps/heatmap_clusters.png`** — a seaborn clustermap: rows/columns reordered
+by hierarchical clustering, with a dendrogram tree on each axis showing nested
+groupings, cells colored by PMI
+
+**`ao3_tag_clusters.csv`** — discrete cluster membership (`tag_id`, `field`,
+`label`, `cluster_id`), cut from the same dendrogram the heatmap plots, so the two
+outputs are always consistent with each other
+
+### Usage
+
+```bash
+python ao3_tag_analysis.py
+```
+
+Reads `ao3_tag_metadata.csv` and writes `ao3_additional_tags_frequency.csv`,
+`heatmaps/heatmap_clusters.png`, and `ao3_tag_clusters.csv`.
+
+```bash
+# Only the frequency ranking, or only the clustering
+python ao3_tag_analysis.py --frequency-only
+python ao3_tag_analysis.py --clusters-only
+
+# Adjust the clustering: more tags pooled, fewer/more discrete clusters, a
+# different scipy linkage method
+python ao3_tag_analysis.py --top-tags 100 --n-clusters 15 --cluster-method ward
+```
+
+The clustering pipeline pools all seven metadata fields into one namespaced label
+space (`f"{field}::{value}"`) and computes pairwise lift/PMI, the same statistic
+`--tag-pairs` uses:
+
+- `lift(A, B) = P(A, B) / (P(A) * P(B))`
+- `pmi(A, B) = log2(lift(A, B))`
+
+...then hierarchically clusters the resulting tag × tag PMI matrix to group labels
+by similarity. `--min-pair-count` drops low-sample coincidences before clustering
+(a pair that only ever co-occurs once has a meaningless but enormous lift), but
+unlike `--tag-pairs`' `--min-pmi`/`--max-pmi` thresholds, clustering keeps the full
+similarity structure, including near-zero PMI values — that's what a dendrogram
+needs.
+
+### All options
+
+```
+--input FILE                 Metadata CSV to read (default: ao3_tag_metadata.csv)
+--frequency-top-n N          Most frequent additional_tags to report (default: 20)
+--frequency-bottom-n N       Least frequent additional_tags to report (default: 20)
+--frequency-min-count N      Floor for "least frequent" -- excludes values with
+                              fewer works than this, e.g. default 2 excludes
+                              one-off singletons (default: 2)
+--frequency-out FILE         Frequency ranking CSV output
+                              (default: ao3_additional_tags_frequency.csv)
+--top-tags N                 Top N tags overall, pooled across all 7 metadata
+                              fields, by document frequency, before clustering
+                              (default: 60)
+--min-pair-count N           Drop pairs co-occurring fewer than this many times
+                              before clustering (default: 2)
+--n-clusters N                Cut the dendrogram into this many discrete clusters
+                              (default: 10)
+--cluster-method {average,complete,ward,single}   scipy linkage method (default: average)
+--heatmap-out-dir DIR        Directory for the cluster heatmap PNG (default: heatmaps)
+--cluster-heatmap-out FILE   Cluster heatmap PNG output
+                              (default: <--heatmap-out-dir>/heatmap_clusters.png)
+--clusters-out FILE          Cluster-membership CSV output (default: ao3_tag_clusters.csv)
+--frequency-only             Only compute the frequency ranking, skip clustering
+--clusters-only              Only compute clustering, skip the frequency ranking
+-h, --help
+```
+
+### Notebook
+
+`ao3_tag_analysis.ipynb` is a Jupyter notebook version of the same tool, structured
+like `ao3_tag_visualizer.ipynb` — edit the Configuration cell, then run all cells in
+order. The clustermap and cluster table render inline in addition to being saved to
+disk.
+
 ## AO3 terms of service
 
 AO3 asks that scraping tools wait between requests to avoid overloading their
