@@ -372,7 +372,7 @@ def run_tag_pair_checks(tmpdir, script_path):
     unsorted_incidence = viz.pd.DataFrame(
         {"warnings::Z": [1, 1, 1, 0], "additional_tags::A": [1, 0, 0, 1]},
         index=["work1", "work2", "work3", "work4"],
-    ).astype("int8")
+    ).astype(viz.pd.SparseDtype("int8", fill_value=0))
     order_stats = viz.tag_pair_statistics(unsorted_incidence, n_docs=4)
     check("tag_pair_statistics canonicalizes tag_a/tag_b even with unsorted incidence columns",
           not order_stats.empty
@@ -385,23 +385,31 @@ def run_tag_pair_checks(tmpdir, script_path):
 
 
 def run_large_scale_sparsity_checks():
-    """Regression guard for the MemoryError a real --all-tags run hit: with
-    81,037 tags, the old dense tags x tags joint matrix needed 48.9 GiB
-    (81,037**2 * 8 bytes). tag_pair_statistics now computes joint via
-    scipy.sparse instead of a dense np.triu_indices sweep. This builds a
-    15,000-tag, 1,000-document incidence matrix (each document holding only
-    a handful of tags, matching realistic freeform-tag sparsity) -- a scale
-    where the old dense approach would need ~1.8 GiB just for the joint
-    matrix (15,000**2 * 8 bytes) despite the real data being tiny -- and
-    confirms both correctness (via two deliberately planted, hand-countable
-    tags) and that it completes quickly rather than attempting a huge
-    allocation."""
+    """Regression guard for two real MemoryErrors hit via --all-tags on an
+    81,037-tag scrape:
+      1. tag_pair_statistics used to compute joint = incidence.T @
+         incidence as a dense tags x tags matrix (48.9 GiB at 81,037 tags)
+         -- now scipy.sparse throughout.
+      2. build_tag_incidence_matrix used pd.crosstab, which densifies a
+         (documents x tags) array internally via pivot_table before ever
+         shrinking it (4+ GiB at 81,037 tags x thousands of documents) --
+         now builds a sparse-dtype DataFrame directly, no dense
+         intermediate at any point.
+
+    This builds a 40,000-tag, 3,000-document incidence matrix (each
+    document holding only a handful of tags, matching realistic
+    freeform-tag sparsity) -- a scale where the OLD pd.crosstab-based
+    construction alone would need ~960 MB just for its float64
+    intermediate, and the old dense joint matrix would need ~12.8 GiB, both
+    despite the real data being tiny -- and confirms both correctness (via
+    two deliberately planted, hand-countable tags) and that both steps
+    complete quickly rather than attempting a huge allocation."""
     import time
 
     import numpy as np
 
     rng = np.random.default_rng(1234)
-    n_tags, n_docs, tags_per_doc = 15000, 1000, 8
+    n_tags, n_docs, tags_per_doc = 40000, 3000, 8
     tag_names = [f"additional_tags::Tag_{i}" for i in range(n_tags)]
 
     rows = []
@@ -419,12 +427,18 @@ def run_large_scale_sparsity_checks():
     keep_tags = set(tag_names) | {"additional_tags::KnownA", "additional_tags::KnownB"}
     total_docs = n_docs + 50
 
+    start = time.time()
     incidence = viz.build_tag_incidence_matrix(tag_table, keep_tags)
+    incidence_elapsed = time.time() - start
+    check("large-scale (40,000-tag) build_tag_incidence_matrix completes quickly "
+          "(would be a huge/slow dense allocation under the old pd.crosstab approach)",
+          incidence_elapsed < 30, f"took {incidence_elapsed:.1f}s")
+
     start = time.time()
     stats = viz.tag_pair_statistics(incidence, n_docs=total_docs)
     elapsed = time.time() - start
 
-    check("large-scale (15,000-tag) tag_pair_statistics completes quickly "
+    check("large-scale (40,000-tag) tag_pair_statistics completes quickly "
           "(would be a huge/slow dense allocation under the old approach)",
           elapsed < 30, f"took {elapsed:.1f}s")
 

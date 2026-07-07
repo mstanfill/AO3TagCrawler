@@ -775,14 +775,39 @@ def top_k_tags_by_document_frequency(tag_table, k):
 
 def build_tag_incidence_matrix(tag_table, keep_tags):
     """Documents x tags boolean incidence matrix (index=work_id,
-    columns=sorted keep_tags, int8). NOTE: its row count is only documents
-    containing >=1 kept tag -- it is NOT the total document count and must
-    never be used as n_docs (a work with none of the top-K tags has no row
-    here, but still belongs in P(A)'s denominator). Column sums (per-tag
-    totals) ARE always correct regardless of this row restriction."""
+    columns=sorted keep_tags), returned as a sparse-dtype pandas DataFrame
+    (int8) -- built directly from (work_id, tag_id) pairs via scipy.sparse
+    rather than pd.crosstab, which densifies internally (pivot_table builds
+    a dense (n_docs x n_tags) float64 array before the ">0"/astype("int8")
+    steps ever get a chance to shrink it -- 4+ GiB at 81,037 tags, a second
+    real MemoryError after --all-tags, one step earlier in the pipeline
+    than the joint-matrix MemoryError tag_pair_statistics already guards
+    against). .shape, .columns, and label-based column indexing/.sum() all
+    keep working exactly as with a plain dense DataFrame -- only how this
+    is built, and how tag_pair_statistics reads it, are sparse now.
+
+    NOTE: its row count is only documents containing >=1 kept tag -- it is
+    NOT the total document count and must never be used as n_docs (a work
+    with none of the top-K tags has no row here, but still belongs in
+    P(A)'s denominator). Column sums (per-tag totals) ARE always correct
+    regardless of this row restriction."""
     filtered = tag_table[tag_table["tag_id"].isin(keep_tags)]
-    incidence = pd.crosstab(filtered["work_id"], filtered["tag_id"]) > 0
-    return incidence.reindex(columns=sorted(keep_tags), fill_value=False).astype("int8")
+    columns = sorted(keep_tags)
+    work_ids = sorted(filtered["work_id"].unique())
+    col_index = {tag_id: i for i, tag_id in enumerate(columns)}
+    row_index = {work_id: i for i, work_id in enumerate(work_ids)}
+
+    row_idx = filtered["work_id"].map(row_index).to_numpy()
+    col_idx = filtered["tag_id"].map(col_index).to_numpy()
+    matrix = sp.coo_matrix(
+        (np.ones(len(filtered), dtype=np.int8), (row_idx, col_idx)),
+        shape=(len(work_ids), len(columns)), dtype=np.int8,
+    ).tocsr()
+    # Collapse any duplicate (work_id, tag_id) rows to a plain 0/1 presence
+    # flag -- matches pd.crosstab(...) > 0's semantics regardless of raw
+    # counts (coo_matrix sums duplicate entries on conversion to csr).
+    matrix.data[:] = 1
+    return pd.DataFrame.sparse.from_spmatrix(matrix, index=work_ids, columns=columns)
 
 
 def tag_pair_statistics(incidence, n_docs):
@@ -793,10 +818,11 @@ def tag_pair_statistics(incidence, n_docs):
     tags matrix would need tens of gigabytes even though the overwhelming
     majority of tag pairs never co-occur (e.g. 81,037 tags -> 6.6 billion
     cells -> 48.9 GiB just for that one array, which is exactly the
-    MemoryError this sparse rewrite fixes). incidence itself (documents x
-    tags) is still densified once via to_numpy() -- that side stays
-    proportional to corpus size, not tag-count squared, and was never the
-    actual bottleneck. joint's diagonal is each tag's own total document
+    MemoryError this sparse rewrite fixes). incidence itself is read via
+    its .sparse.to_coo() accessor rather than to_numpy(), so it's never
+    densified either -- build_tag_incidence_matrix already returns it as a
+    sparse-dtype DataFrame for the same reason. joint's diagonal is each
+    tag's own total document
     count (marginal). n_docs must be the TRUE total document count
     (df["work_id"].nunique() on the original, undeduplicated df --
     nunique() already ignores duplicate rows), never incidence.shape[0]
@@ -813,7 +839,7 @@ def tag_pair_statistics(incidence, n_docs):
     column order), joint_count > 0.
     """
     tags = list(incidence.columns)
-    values = sp.csr_matrix(incidence.to_numpy(dtype=np.int64))
+    values = incidence.sparse.to_coo().tocsr().astype(np.int64)
     joint = values.T @ values
     marginal = np.asarray(joint.diagonal()).ravel()
 
