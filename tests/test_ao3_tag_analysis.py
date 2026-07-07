@@ -35,10 +35,10 @@ def check(name, condition, detail=""):
 
 def base_row(work_id, rating="Teen And Up Audiences", warnings="No Archive Warnings Apply",
              category="Gen", fandom="Fandom_A", relationship="", character="",
-             additional_tags=""):
+             additional_tags="", tag="Search_Tag"):
     row = {field: "" for field in METADATA_FIELDS}
     row.update({
-        "tag": "Seed",
+        "tag": tag,
         "work_id": work_id,
         "title": f"Work {work_id}",
         "author": "author",
@@ -66,21 +66,36 @@ def base_row(work_id, rating="Teen And Up Audiences", warnings="No Archive Warni
 
 
 # ---------------------------------------------------------------------------
-# Frequency-ranking fixture: additional_tags counts are, by design:
-#   Common_Tag=10, Medium_Tag=5, Tie_A=3, Tie_B=3, Rare_Tag=2,
-#   Singleton_A=1, Singleton_B=1  (25 works total, work_ids 1-25)
+# Frequency-ranking fixture: additional_tags counts and their searched seed
+# tag are, by design:
+#   Common_Tag=10 (seed tag == "Common_Tag" -- also a seed tag itself)
+#   Seed_Extra=4  (seed tag == "Seed_Extra" -- also a seed tag itself)
+#   Medium_Tag=5, Tie_A=3, Tie_B=3, Rare_Tag=2, Singleton_A=1, Singleton_B=1
+#     (all searched under the non-overlapping placeholder seed tag
+#     "Search_Tag" -- never equal to their own additional_tags value)
+#   (29 works total, work_ids 1-29)
+#
+# seed_tags = {"Common_Tag", "Seed_Extra", "Search_Tag"}, so Common_Tag and
+# Seed_Extra are the only additional_tags values that also appear as a
+# searched seed tag -- everything else is non-seed.
 # ---------------------------------------------------------------------------
 
 def build_frequency_fixture_rows():
     tag_counts = [
-        ("Common_Tag", 10), ("Medium_Tag", 5), ("Tie_A", 3), ("Tie_B", 3),
-        ("Rare_Tag", 2), ("Singleton_A", 1), ("Singleton_B", 1),
+        ("Common_Tag", 10, "Common_Tag"),
+        ("Seed_Extra", 4, "Seed_Extra"),
+        ("Medium_Tag", 5, "Search_Tag"),
+        ("Tie_A", 3, "Search_Tag"),
+        ("Tie_B", 3, "Search_Tag"),
+        ("Rare_Tag", 2, "Search_Tag"),
+        ("Singleton_A", 1, "Search_Tag"),
+        ("Singleton_B", 1, "Search_Tag"),
     ]
     rows = []
     work_id = 1
-    for tag, count in tag_counts:
+    for additional_tag, count, seed_tag in tag_counts:
         for _ in range(count):
-            rows.append(base_row(work_id, additional_tags=tag))
+            rows.append(base_row(work_id, tag=seed_tag, additional_tags=additional_tag))
             work_id += 1
     return rows
 
@@ -144,10 +159,23 @@ def run_frequency_checks(tmpdir, script_path):
     write_frequency_fixture_csv(csv_path)
     df = viz.load_metadata(csv_path)
 
-    most, least = analysis.additional_tags_frequency(df, min_bottom_count=2)
+    most_seed, most_non_seed, least = analysis.additional_tags_frequency(df, min_bottom_count=2)
 
-    check("most-frequent additional_tags is Common_Tag",
-          most.iloc[0]["additional_tags"] == "Common_Tag", f"got {most.iloc[0].to_dict()}")
+    check("Common_Tag (also a seed tag) lands in most_frequent_seed",
+          "Common_Tag" in most_seed["additional_tags"].values,
+          f"got {most_seed['additional_tags'].tolist()}")
+    check("Medium_Tag (never a seed tag) lands in most_frequent_non_seed",
+          "Medium_Tag" in most_non_seed["additional_tags"].values,
+          f"got {most_non_seed['additional_tags'].tolist()}")
+    check("most_frequent_seed contains only Common_Tag and Seed_Extra",
+          set(most_seed["additional_tags"]) == {"Common_Tag", "Seed_Extra"},
+          f"got {most_seed['additional_tags'].tolist()}")
+    check("most_frequent_seed is ordered by count descending (Common_Tag before Seed_Extra)",
+          most_seed["additional_tags"].tolist() == ["Common_Tag", "Seed_Extra"],
+          f"got {most_seed['additional_tags'].tolist()}")
+    check("most-frequent non-seed additional_tags is Medium_Tag",
+          most_non_seed.iloc[0]["additional_tags"] == "Medium_Tag",
+          f"got {most_non_seed.iloc[0].to_dict()}")
     check("least-frequent (floor=2) additional_tags is Rare_Tag",
           least.iloc[0]["additional_tags"] == "Rare_Tag", f"got {least.iloc[0].to_dict()}")
     check("singletons excluded from least-frequent at default floor",
@@ -155,16 +183,17 @@ def run_frequency_checks(tmpdir, script_path):
           and "Singleton_B" not in least["additional_tags"].values,
           f"got {least['additional_tags'].tolist()}")
 
-    _, least_floor1 = analysis.additional_tags_frequency(df, min_bottom_count=1)
+    _, _, least_floor1 = analysis.additional_tags_frequency(df, min_bottom_count=1)
     check("singletons included when --frequency-min-count 1",
           "Singleton_A" in least_floor1["additional_tags"].values
           and "Singleton_B" in least_floor1["additional_tags"].values,
           f"got {least_floor1['additional_tags'].tolist()}")
 
     # Tie-break: Tie_A and Tie_B both count=3, alphabetically Tie_A first,
-    # in both the descending (most) and ascending (least) sort orders.
-    tied_most = most[most["additional_tags"].isin(["Tie_A", "Tie_B"])]
-    check("most-frequent tie-break is alphabetical (Tie_A before Tie_B)",
+    # in both the descending (most_frequent_non_seed) and ascending (least)
+    # sort orders.
+    tied_most = most_non_seed[most_non_seed["additional_tags"].isin(["Tie_A", "Tie_B"])]
+    check("most_frequent_non_seed tie-break is alphabetical (Tie_A before Tie_B)",
           tied_most["additional_tags"].tolist() == ["Tie_A", "Tie_B"],
           f"got {tied_most['additional_tags'].tolist()}")
     tied_least = least[least["additional_tags"].isin(["Tie_A", "Tie_B"])]
@@ -198,12 +227,20 @@ def run_frequency_checks(tmpdir, script_path):
     check("main() --frequency-only exits 0", result.returncode == 0, f"stderr: {result.stderr}")
     with open(freq_out, newline="", encoding="utf-8") as f:
         cli_rows = list(csv.DictReader(f))
-    check("--frequency-top-n 3 --frequency-bottom-n 3 produces 6 rows",
-          len(cli_rows) == 6, f"got {len(cli_rows)} rows: {cli_rows}")
-    most_tags = [r["additional_tags"] for r in cli_rows if r["rank_type"] == "most_frequent"]
+    # --frequency-top-n 3: most_frequent_seed only has 2 members (Common_Tag,
+    # Seed_Extra) so head(3) returns both; most_frequent_non_seed returns 3;
+    # --frequency-bottom-n 3: least_frequent returns 3. 2 + 3 + 3 = 8 rows.
+    check("--frequency-top-n 3 --frequency-bottom-n 3 produces 8 rows",
+          len(cli_rows) == 8, f"got {len(cli_rows)} rows: {cli_rows}")
+    most_seed_tags = [r["additional_tags"] for r in cli_rows
+                       if r["rank_type"] == "most_frequent_seed_tag"]
+    most_non_seed_tags = [r["additional_tags"] for r in cli_rows
+                           if r["rank_type"] == "most_frequent_non_seed_tag"]
     least_tags = [r["additional_tags"] for r in cli_rows if r["rank_type"] == "least_frequent"]
-    check("CLI top-3 most_frequent is [Common_Tag, Medium_Tag, Tie_A]",
-          most_tags == ["Common_Tag", "Medium_Tag", "Tie_A"], f"got {most_tags}")
+    check("CLI most_frequent_seed_tag is [Common_Tag, Seed_Extra]",
+          most_seed_tags == ["Common_Tag", "Seed_Extra"], f"got {most_seed_tags}")
+    check("CLI top-3 most_frequent_non_seed_tag is [Medium_Tag, Tie_A, Tie_B]",
+          most_non_seed_tags == ["Medium_Tag", "Tie_A", "Tie_B"], f"got {most_non_seed_tags}")
     check("CLI bottom-3 least_frequent is [Rare_Tag, Tie_A, Tie_B]",
           least_tags == ["Rare_Tag", "Tie_A", "Tie_B"], f"got {least_tags}")
 

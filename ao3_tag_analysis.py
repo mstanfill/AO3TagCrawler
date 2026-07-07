@@ -39,39 +39,56 @@ CLUSTER_METHODS = ["average", "complete", "ward", "single"]
 # ---------------------------------------------------------------------------
 
 def additional_tags_frequency(df, min_bottom_count=2):
-    """Returns (most_frequent, least_frequent), each a DataFrame
-    [additional_tags, count]. most_frequent is sorted highest-count first
-    (alphabetical tie-break, matching top_n_values's convention);
-    least_frequent is pre-filtered to count >= min_bottom_count (default 2,
-    i.e. excludes true one-off singletons) and sorted lowest-count first
-    (alphabetical tie-break)."""
+    """Returns (most_frequent_seed, most_frequent_non_seed, least_frequent),
+    each a DataFrame [additional_tags, count]. Seed tags are the values in
+    df["tag"] (the AO3 tag actually searched to find each work, same
+    definition ao3_tag_visualizer.py's rank_seed_tags uses) -- an
+    additional_tags value that also happens to be a seed tag partly
+    reflects the scrape's own search bias rather than a genuinely emergent
+    discovery, so it's split out from non-seed values. Both "most" buckets
+    are sorted highest-count first (alphabetical tie-break, matching
+    top_n_values's convention). least_frequent is unchanged: drawn from the
+    full additional_tags pool (seed tags included), pre-filtered to
+    count >= min_bottom_count (default 2, i.e. excludes true one-off
+    singletons), sorted lowest-count first (alphabetical tie-break)."""
+    seed_tags = set(df["tag"].unique())
     exploded = viz.explode_field(df, "additional_tags")
     counts = viz.total_value_counts(exploded, "additional_tags")
     counts = counts.reset_index()
     counts.columns = ["additional_tags", "count"]
 
-    most_frequent = counts.sort_values(["count", "additional_tags"],
-                                        ascending=[False, True])
+    def sort_desc(c):
+        return c.sort_values(["count", "additional_tags"], ascending=[False, True])
+
+    is_seed = counts["additional_tags"].isin(seed_tags)
+    most_frequent_seed = sort_desc(counts[is_seed])
+    most_frequent_non_seed = sort_desc(counts[~is_seed])
+
     least_frequent = counts[counts["count"] >= min_bottom_count]
     least_frequent = least_frequent.sort_values(["count", "additional_tags"],
                                                  ascending=[True, True])
-    return most_frequent, least_frequent
+    return most_frequent_seed, most_frequent_non_seed, least_frequent
 
 
-def write_frequency_csv(most_frequent, least_frequent, top_n, bottom_n, out_path):
-    most = most_frequent.head(top_n).copy()
-    most["rank_type"] = "most_frequent"
+def write_frequency_csv(most_frequent_seed, most_frequent_non_seed, least_frequent,
+                         top_n, bottom_n, out_path):
+    most_seed = most_frequent_seed.head(top_n).copy()
+    most_seed["rank_type"] = "most_frequent_seed_tag"
+    most_non_seed = most_frequent_non_seed.head(top_n).copy()
+    most_non_seed["rank_type"] = "most_frequent_non_seed_tag"
     least = least_frequent.head(bottom_n).copy()
     least["rank_type"] = "least_frequent"
-    combined = pd.concat([most, least], ignore_index=True)
+    combined = pd.concat([most_seed, most_non_seed, least], ignore_index=True)
     combined = combined[["rank_type", "additional_tags", "count"]]
     combined.to_csv(out_path, index=False)
     return combined
 
 
-def print_frequency_summary(most_frequent, least_frequent, top_n, bottom_n, out_path):
+def print_frequency_summary(most_frequent_seed, most_frequent_non_seed, least_frequent,
+                             top_n, bottom_n, out_path):
     print(f"  wrote {out_path} "
-          f"({min(top_n, len(most_frequent))} most frequent, "
+          f"({min(top_n, len(most_frequent_seed))} most frequent seed tags, "
+          f"{min(top_n, len(most_frequent_non_seed))} most frequent non-seed tags, "
           f"{min(bottom_n, len(least_frequent))} least frequent)")
 
 
@@ -182,7 +199,9 @@ def build_arg_parser():
                          help="Metadata CSV to read (default: ao3_tag_metadata.csv)")
 
     parser.add_argument("--frequency-top-n", type=int, default=20,
-                         help="Most frequent additional_tags to report (default: 20)")
+                         help="Most frequent additional_tags to report, per category -- "
+                              "seed tags (values that are also a searched seed tag) and "
+                              "non-seed tags each get up to this many (default: 20)")
     parser.add_argument("--frequency-bottom-n", type=int, default=20,
                          help="Least frequent additional_tags to report (default: 20)")
     parser.add_argument("--frequency-min-count", type=int, default=2,
@@ -229,12 +248,12 @@ def main(argv=None):
 
     if not args.clusters_only:
         print("Building additional_tags frequency ranking")
-        most_frequent, least_frequent = additional_tags_frequency(
+        most_frequent_seed, most_frequent_non_seed, least_frequent = additional_tags_frequency(
             df, min_bottom_count=args.frequency_min_count)
-        write_frequency_csv(most_frequent, least_frequent,
+        write_frequency_csv(most_frequent_seed, most_frequent_non_seed, least_frequent,
                              args.frequency_top_n, args.frequency_bottom_n,
                              args.frequency_out)
-        print_frequency_summary(most_frequent, least_frequent,
+        print_frequency_summary(most_frequent_seed, most_frequent_non_seed, least_frequent,
                                  args.frequency_top_n, args.frequency_bottom_n,
                                  args.frequency_out)
 
