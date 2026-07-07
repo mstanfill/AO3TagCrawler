@@ -363,6 +363,26 @@ def run_tag_pair_checks(tmpdir, script_path):
           "--min-pmi" in warn_result.stderr and "--max-pmi" in warn_result.stderr,
           f"stderr: {warn_result.stderr}")
 
+    # 10. Order-independence: tag_pair_statistics must canonicalize
+    # tag_a/tag_b itself, not merely inherit alphabetical order from a
+    # caller that happens to pre-sort its incidence matrix's columns.
+    # build_tag_incidence_matrix always sorts, so this is the only way to
+    # actually exercise that guarantee -- feed a hand-built incidence
+    # matrix with columns in reverse alphabetical order directly.
+    unsorted_incidence = viz.pd.DataFrame(
+        {"warnings::Z": [1, 1, 1, 0], "additional_tags::A": [1, 0, 0, 1]},
+        index=["work1", "work2", "work3", "work4"],
+    ).astype("int8")
+    order_stats = viz.tag_pair_statistics(unsorted_incidence, n_docs=4)
+    check("tag_pair_statistics canonicalizes tag_a/tag_b even with unsorted incidence columns",
+          not order_stats.empty
+          and order_stats.iloc[0]["tag_a"] == "additional_tags::A"
+          and order_stats.iloc[0]["tag_b"] == "warnings::Z",
+          f"got {order_stats.to_dict('records')}")
+    check("count_a/count_b stay correctly paired with the canonicalized tag_a/tag_b",
+          order_stats.iloc[0]["count_a"] == 2 and order_stats.iloc[0]["count_b"] == 3,
+          f"got {order_stats.to_dict('records')}")
+
 
 def main():
     tmpdir = tempfile.mkdtemp(prefix="ao3_viz_test_")
