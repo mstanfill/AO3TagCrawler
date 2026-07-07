@@ -296,15 +296,21 @@ existing `ao3_tag_metadata.csv` and runs two further analyses, beyond
 
 | Feature | Detail |
 |---|---|
-| **additional_tags frequency ranking** | Which `additional_tags` values are most common, and which are least common (excluding one-off singletons) |
+| **additional_tags frequency ranking** | Three categories: most frequent `additional_tags` values that are also a seed tag, most frequent values that aren't, and least frequent values (excluding one-off singletons) |
 | **Cross-field hierarchical clustering** | Pools labels from *all* metadata fields (`rating`, `warnings`, `category`, `fandom`, `relationship`, `character`, `additional_tags`) and clusters them by lift/PMI similarity — which labels of any kind tend to appear together — rendered as a dendrogram + reordered heatmap plus a discrete cluster-membership CSV |
 
 Both analyses run by default; `--frequency-only`/`--clusters-only` narrow it to one.
 
 ### Output files
 
-**`ao3_additional_tags_frequency.csv`** — the N most and N least frequent
-`additional_tags` values, each row tagged `most_frequent`/`least_frequent`
+**`ao3_additional_tags_frequency.csv`** — each row tagged by `rank_type`:
+`most_frequent_seed_tag` (an `additional_tags` value that's also a **seed
+tag** — the AO3 tag actually searched to find each work, i.e. the `tag`
+column in `ao3_tag_metadata.csv` — partly reflecting the scrape's own search
+bias rather than a genuinely emergent discovery), `most_frequent_non_seed_tag`
+(the same ranking restricted to values that were never searched for directly),
+or `least_frequent` (drawn from the full `additional_tags` pool, seed tags
+included, unchanged by the seed/non-seed split above)
 
 **`heatmaps/heatmap_clusters.png`** — a seaborn clustermap: rows/columns reordered
 by hierarchical clustering, with a dendrogram tree on each axis showing nested
@@ -351,7 +357,9 @@ needs.
 
 ```
 --input FILE                 Metadata CSV to read (default: ao3_tag_metadata.csv)
---frequency-top-n N          Most frequent additional_tags to report (default: 20)
+--frequency-top-n N          Most frequent additional_tags to report, per category --
+                              seed tags and non-seed tags each get up to this many
+                              (default: 20)
 --frequency-bottom-n N       Least frequent additional_tags to report (default: 20)
 --frequency-min-count N      Floor for "least frequent" -- excludes values with
                               fewer works than this, e.g. default 2 excludes
