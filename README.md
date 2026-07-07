@@ -297,7 +297,7 @@ existing `ao3_tag_metadata.csv` and runs two further analyses, beyond
 | Feature | Detail |
 |---|---|
 | **additional_tags frequency ranking** | Three categories: most frequent `additional_tags` values that are also a seed tag, most frequent values that aren't, and least frequent values (excluding one-off singletons) |
-| **Cross-field hierarchical clustering** | Pools labels from *all* metadata fields (`rating`, `warnings`, `category`, `fandom`, `relationship`, `character`, `additional_tags`) and clusters them by lift/PMI similarity — which labels of any kind tend to appear together — rendered as a dendrogram + reordered heatmap plus a discrete cluster-membership CSV |
+| **Cross-field hierarchical clustering** | Pools labels from *all* metadata fields (`rating`, `warnings`, `category`, `fandom`, `relationship`, `character`, `additional_tags`) — or every tag with `--all-tags` — and clusters them by lift/PMI similarity — which labels of any kind tend to appear together — rendered as a dendrogram + reordered heatmap plus a discrete cluster-membership CSV, optionally enforcing a minimum cluster size via `--min-cluster-size` |
 
 Both analyses run by default; `--frequency-only`/`--clusters-only` narrow it to one.
 
@@ -337,6 +337,12 @@ python ao3_tag_analysis.py --clusters-only
 # Adjust the clustering: more tags pooled, fewer/more discrete clusters, a
 # different scipy linkage method
 python ao3_tag_analysis.py --top-tags 100 --n-clusters 15 --cluster-method ward
+
+# Cluster every tag (no top-N truncation) and require at least 3 tags per
+# cluster -- --n-clusters becomes a ceiling, not a fixed target: the tool
+# walks down from it to the largest cluster count where every cluster
+# still meets the minimum size
+python ao3_tag_analysis.py --all-tags --n-clusters 15 --min-cluster-size 3
 ```
 
 The clustering pipeline pools all seven metadata fields into one namespaced label
@@ -367,12 +373,18 @@ needs.
 --frequency-out FILE         Frequency ranking CSV output
                               (default: ao3_additional_tags_frequency.csv)
 --top-tags N                 Top N tags overall, pooled across all 7 metadata
-                              fields, by document frequency, before clustering
-                              (default: 60)
+                              fields, by document frequency, before clustering.
+                              Overridden by --all-tags (default: 60)
+--all-tags                   Cluster using every tag from all 7 metadata fields,
+                              ignoring --top-tags (default: off)
 --min-pair-count N           Drop pairs co-occurring fewer than this many times
                               before clustering (default: 2)
---n-clusters N                Cut the dendrogram into this many discrete clusters
-                              (default: 10)
+--n-clusters N                Cut the dendrogram into up to this many discrete
+                              clusters -- a ceiling rather than a fixed target
+                              when --min-cluster-size is set (default: 10)
+--min-cluster-size N          Merge/reduce clusters smaller than this; --n-clusters
+                              becomes a ceiling rather than a fixed target when
+                              this is > 1 (default: 1, no minimum)
 --cluster-method {average,complete,ward,single}   scipy linkage method (default: average)
 --heatmap-out-dir DIR        Directory for the cluster heatmap PNG (default: heatmaps)
 --cluster-heatmap-out FILE   Cluster heatmap PNG output
