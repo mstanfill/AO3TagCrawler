@@ -297,7 +297,7 @@ existing `ao3_tag_metadata.csv` and runs two further analyses, beyond
 | Feature | Detail |
 |---|---|
 | **additional_tags frequency ranking** | Three categories: most frequent `additional_tags` values that are also a seed tag, most frequent values that aren't, and least frequent values (excluding one-off singletons) |
-| **Cross-field hierarchical clustering** | Pools labels from *all* metadata fields (`rating`, `warnings`, `category`, `fandom`, `relationship`, `character`, `additional_tags`) — or every tag with `--all-tags` — and clusters them by lift/PMI similarity — which labels of any kind tend to appear together — rendered as a dendrogram + reordered heatmap plus a discrete cluster-membership CSV, optionally enforcing a minimum cluster size via `--min-cluster-size` |
+| **Cross-field community detection** | Pools labels from *all* metadata fields (`rating`, `warnings`, `category`, `fandom`, `relationship`, `character`, `additional_tags`) — or every tag with `--all-tags` — and groups them by lift/PMI similarity via graph-based community detection (Louvain) — which labels of any kind tend to appear together — rendered as an interactive network graph plus a discrete cluster-membership CSV, optionally enforcing a minimum cluster size via `--min-cluster-size` |
 
 Both analyses run by default; `--frequency-only`/`--clusters-only` narrow it to one.
 
@@ -312,13 +312,15 @@ bias rather than a genuinely emergent discovery), `most_frequent_non_seed_tag`
 or `least_frequent` (drawn from the full `additional_tags` pool, seed tags
 included, unchanged by the seed/non-seed split above)
 
-**`heatmaps/heatmap_clusters.png`** — a seaborn clustermap: rows/columns reordered
-by hierarchical clustering, with a dendrogram tree on each axis showing nested
-groupings, cells colored by PMI
+**`ao3_tag_cluster_network.html`** — an interactive network graph (same
+pyvis/vis-network machinery as `--tag-pairs`' network): every kept tag is a node,
+colored/grouped by its final cluster, with checkboxes to filter by cluster and a
+tag picker to narrow to specific tags and their direct connections. An edge is
+drawn between any pair with `pmi > 0` (co-occurs more than chance)
 
 **`ao3_tag_clusters.csv`** — discrete cluster membership (`tag_id`, `field`,
-`label`, `cluster_id`), cut from the same dendrogram the heatmap plots, so the two
-outputs are always consistent with each other
+`label`, `cluster_id`), built from the same community-detection result the network
+graph is colored by, so the two outputs are always consistent with each other
 
 ### Usage
 
@@ -327,22 +329,21 @@ python ao3_tag_analysis.py
 ```
 
 Reads `ao3_tag_metadata.csv` and writes `ao3_additional_tags_frequency.csv`,
-`heatmaps/heatmap_clusters.png`, and `ao3_tag_clusters.csv`.
+`ao3_tag_cluster_network.html`, and `ao3_tag_clusters.csv`.
 
 ```bash
 # Only the frequency ranking, or only the clustering
 python ao3_tag_analysis.py --frequency-only
 python ao3_tag_analysis.py --clusters-only
 
-# Adjust the clustering: more tags pooled, fewer/more discrete clusters, a
-# different scipy linkage method
-python ao3_tag_analysis.py --top-tags 100 --n-clusters 15 --cluster-method ward
+# Adjust the clustering: more tags pooled, a higher Louvain resolution for
+# more/smaller communities
+python ao3_tag_analysis.py --top-tags 100 --cluster-resolution 1.5
 
 # Cluster every tag (no top-N truncation) and require at least 3 tags per
-# cluster -- --n-clusters becomes a ceiling, not a fixed target: the tool
-# walks down from it to the largest cluster count where every cluster
-# still meets the minimum size
-python ao3_tag_analysis.py --all-tags --n-clusters 15 --min-cluster-size 3
+# cluster -- undersized communities are merged into their strongest-connected
+# neighbor (or the largest remaining community, if fully isolated)
+python ao3_tag_analysis.py --all-tags --min-cluster-size 3
 ```
 
 The clustering pipeline pools all seven metadata fields into one namespaced label
@@ -352,12 +353,13 @@ space (`f"{field}::{value}"`) and computes pairwise lift/PMI, the same statistic
 - `lift(A, B) = P(A, B) / (P(A) * P(B))`
 - `pmi(A, B) = log2(lift(A, B))`
 
-...then hierarchically clusters the resulting tag × tag PMI matrix to group labels
-by similarity. `--min-pair-count` drops low-sample coincidences before clustering
-(a pair that only ever co-occurs once has a meaningless but enormous lift), but
-unlike `--tag-pairs`' `--min-pmi`/`--max-pmi` thresholds, clustering keeps the full
-similarity structure, including near-zero PMI values — that's what a dendrogram
-needs.
+...then groups labels into communities via graph-based community detection
+(networkx's Louvain algorithm), operating directly on the sparse co-occurrence
+graph — only real `pmi > 0` edges are ever materialized, never a dense tag × tag
+matrix, so this scales to tens of thousands of tags the way a dendrogram (which
+needs a full pairwise-distance matrix) can't. `--min-pair-count` drops low-sample
+coincidences before clustering (a pair that only ever co-occurs once has a
+meaningless but enormous lift).
 
 ### All options
 
@@ -379,16 +381,15 @@ needs.
                               ignoring --top-tags (default: off)
 --min-pair-count N           Drop pairs co-occurring fewer than this many times
                               before clustering (default: 2)
---n-clusters N                Cut the dendrogram into up to this many discrete
-                              clusters -- a ceiling rather than a fixed target
-                              when --min-cluster-size is set (default: 10)
---min-cluster-size N          Merge/reduce clusters smaller than this; --n-clusters
-                              becomes a ceiling rather than a fixed target when
-                              this is > 1 (default: 1, no minimum)
---cluster-method {average,complete,ward,single}   scipy linkage method (default: average)
---heatmap-out-dir DIR        Directory for the cluster heatmap PNG (default: heatmaps)
---cluster-heatmap-out FILE   Cluster heatmap PNG output
-                              (default: <--heatmap-out-dir>/heatmap_clusters.png)
+--cluster-resolution F       Louvain resolution -- higher means more, smaller
+                              communities; lower means fewer, larger ones
+                              (default: 1.0)
+--min-cluster-size N         Merge communities smaller than this into another
+                              community (their strongest-connected neighbor, or
+                              the largest remaining community if fully isolated)
+                              (default: 1, no minimum)
+--cluster-network-out FILE   Cluster network HTML output
+                              (default: ao3_tag_cluster_network.html)
 --clusters-out FILE          Cluster-membership CSV output (default: ao3_tag_clusters.csv)
 --frequency-only             Only compute the frequency ranking, skip clustering
 --clusters-only              Only compute clustering, skip the frequency ranking
@@ -399,8 +400,8 @@ needs.
 
 `ao3_tag_analysis.ipynb` is a Jupyter notebook version of the same tool, structured
 like `ao3_tag_visualizer.ipynb` — edit the Configuration cell, then run all cells in
-order. The clustermap and cluster table render inline in addition to being saved to
-disk.
+order. The cluster network and cluster table render inline in addition to being
+saved to disk.
 
 ## AO3 terms of service
 

@@ -209,9 +209,9 @@ def run_frequency_checks(tmpdir, script_path):
     check("--frequency-min-count defaults to 2", default_args.frequency_min_count == 2)
     check("--top-tags defaults to 60", default_args.top_tags == 60)
     check("--min-pair-count defaults to 2", default_args.min_pair_count == 2)
-    check("--n-clusters defaults to 10", default_args.n_clusters == 10)
-    check("--cluster-method defaults to average", default_args.cluster_method == "average")
-    check("--cluster-heatmap-out defaults to None", default_args.cluster_heatmap_out is None)
+    check("--cluster-resolution defaults to 1.0", default_args.cluster_resolution == 1.0)
+    check("--cluster-network-out defaults to ao3_tag_cluster_network.html",
+          default_args.cluster_network_out == "ao3_tag_cluster_network.html")
     check("--all-tags defaults to False", default_args.all_tags is False)
     check("--min-cluster-size defaults to 1", default_args.min_cluster_size == 1)
     check("--frequency-only defaults to False", default_args.frequency_only is False)
@@ -249,8 +249,8 @@ def run_frequency_checks(tmpdir, script_path):
     # --frequency-only / --clusters-only narrowing.
     check("--frequency-only does NOT produce the clusters CSV",
           not os.path.exists(os.path.join(cli_dir, "ao3_tag_clusters.csv")))
-    check("--frequency-only does NOT produce the cluster heatmap",
-          not os.path.exists(os.path.join(cli_dir, "heatmaps", "heatmap_clusters.png")))
+    check("--frequency-only does NOT produce the cluster network HTML",
+          not os.path.exists(os.path.join(cli_dir, "ao3_tag_cluster_network.html")))
 
     clusters_only_dir = os.path.join(tmpdir, "clusters_only_run")
     os.makedirs(clusters_only_dir, exist_ok=True)
@@ -258,7 +258,7 @@ def run_frequency_checks(tmpdir, script_path):
     result2 = subprocess.run(
         [sys.executable, script_path, "--input", csv_path, "--clusters-only",
          "--frequency-out", clusters_only_freq_out,
-         "--heatmap-out-dir", os.path.join(clusters_only_dir, "heatmaps"),
+         "--cluster-network-out", os.path.join(clusters_only_dir, "cluster_network.html"),
          "--clusters-out", os.path.join(clusters_only_dir, "clusters.csv")],
         capture_output=True, text=True,
     )
@@ -319,30 +319,32 @@ def run_clustering_checks(tmpdir, script_path):
     check("top_tags=None (--all-tags) keeps all 14 tags",
           keep_tags_all == all_tags, f"got {keep_tags_all}")
 
-    # NaN handling: display_matrix has NaN (block A / block B never
-    # co-occur), fill_matrix does not (scipy linkage can't handle NaN).
-    display_matrix, fill_matrix = analysis.build_cluster_matrix(pair_stats8, keep_tags8)
-    check("display_matrix has NaN cells (cross-block pairs never observed)",
-          display_matrix.isna().any().any())
-    check("fill_matrix has no NaN cells (safe for scipy linkage)",
-          not fill_matrix.isna().any().any())
+    # Graph construction: every keep_tags8 tag is a node upfront, edges only
+    # for pmi > 0 pairs.
+    graph8 = analysis.build_cluster_graph(pair_stats8, keep_tags8)
+    check("build_cluster_graph has a node for every kept tag",
+          set(graph8.nodes) == keep_tags8, f"got {set(graph8.nodes)}")
+    check("build_cluster_graph only adds edges for pmi > 0 pairs",
+          all(data["pmi"] > 0 for _, _, data in graph8.edges(data=True)))
 
-    # Clustering recovers the two known blocks: exclude RareThing
-    # (top_tags=13, the lowest-count tag) so its all-zero row can't muddy a
-    # clean 2-cluster split, then cut at n_clusters=2.
+    # Community detection recovers the two known blocks: exclude RareThing
+    # (top_tags=13, the lowest-count tag) so its isolated node can't muddy a
+    # clean 2-community split.
     pair_stats13, keep_tags13 = analysis.build_all_fields_pair_data(df, top_tags=13, min_pair_count=2)
     check("--top-tags 13 excludes RareThing",
           "additional_tags::RareThing" not in keep_tags13, f"got {keep_tags13}")
-    display13, fill13 = analysis.build_cluster_matrix(pair_stats13, keep_tags13)
-    linkage_matrix = analysis.compute_linkage(fill13, method="average")
-    check("compute_linkage returns a linkage matrix", linkage_matrix is not None)
-    clusters_df = analysis.cut_clusters(linkage_matrix, list(fill13.index), n_clusters=2)
+    graph13 = analysis.build_cluster_graph(pair_stats13, keep_tags13)
+    communities13 = analysis.detect_communities(graph13)
     block_a_tags = {"rating::Mature", "warnings::No Archive Warnings Apply", "category::F/M",
                      "fandom::Alpha", "relationship::A/B", "character::Bob", "additional_tags::Whump"}
     block_b_tags = {"rating::Teen And Up Audiences", "warnings::Graphic Depictions Of Violence",
                      "category::Gen", "fandom::Beta", "character::Carol", "additional_tags::Angst"}
+    check("Louvain community detection recovers exactly the two known blocks",
+          {frozenset(c) for c in communities13} == {frozenset(block_a_tags), frozenset(block_b_tags)},
+          f"got {[set(c) for c in communities13]}")
+    clusters_df = analysis.assign_cluster_ids(communities13)
     cluster_groups = clusters_df.groupby("cluster_id")["tag_id"].apply(set).tolist()
-    check("n_clusters=2 recovers exactly the two known blocks",
+    check("assign_cluster_ids preserves the two known blocks",
           {frozenset(g) for g in cluster_groups} == {frozenset(block_a_tags), frozenset(block_b_tags)},
           f"got {cluster_groups}")
 
@@ -350,25 +352,24 @@ def run_clustering_checks(tmpdir, script_path):
     full_dir = os.path.join(tmpdir, "full_run")
     os.makedirs(full_dir, exist_ok=True)
     freq_out = os.path.join(full_dir, "frequency.csv")
-    heatmap_dir = os.path.join(full_dir, "heatmaps")
+    network_out = os.path.join(full_dir, "cluster_network.html")
     clusters_out = os.path.join(full_dir, "clusters.csv")
     result = subprocess.run(
         [sys.executable, script_path, "--input", csv_path,
-         "--frequency-out", freq_out, "--heatmap-out-dir", heatmap_dir,
-         "--clusters-out", clusters_out, "--top-tags", "13", "--n-clusters", "2"],
+         "--frequency-out", freq_out, "--cluster-network-out", network_out,
+         "--clusters-out", clusters_out, "--top-tags", "13"],
         capture_output=True, text=True,
     )
     check("full default main() run exits 0", result.returncode == 0, f"stderr: {result.stderr}")
-    heatmap_path = os.path.join(heatmap_dir, "heatmap_clusters.png")
-    check("full run produces a non-empty cluster heatmap PNG",
-          os.path.exists(heatmap_path) and os.path.getsize(heatmap_path) > 0)
+    check("full run produces a non-empty cluster network HTML",
+          os.path.exists(network_out) and os.path.getsize(network_out) > 0)
     check("full run produces the clusters CSV", os.path.exists(clusters_out))
     check("full run produces the frequency CSV", os.path.exists(freq_out))
 
     with open(clusters_out, newline="", encoding="utf-8") as f:
         cli_clusters = list(csv.DictReader(f))
     cli_cluster_ids = {row["cluster_id"] for row in cli_clusters}
-    check("--n-clusters 2 CLI run produces exactly 2 distinct cluster_id values",
+    check("CLI run on the block fixture produces exactly 2 distinct cluster_id values",
           len(cli_cluster_ids) == 2, f"got {cli_cluster_ids}")
     cli_block_a = {row["tag_id"] for row in cli_clusters
                    if row["tag_id"] in block_a_tags}
@@ -382,14 +383,14 @@ def run_clustering_checks(tmpdir, script_path):
           f"block A cluster ids: {cli_a_cluster_ids}, block B cluster ids: {cli_b_cluster_ids}")
 
     # --all-tags CLI run: every kept tag gets a row, including RareThing
-    # (zero surviving pairs, per the existing "Found Family stays as an
-    # all-zero row" precedent for tag_pair_matrix).
+    # (isolated node with zero surviving edges, per the existing "Found
+    # Family stays as an all-zero row" precedent from tag_pair_matrix).
     all_tags_dir = os.path.join(tmpdir, "all_tags_run")
     os.makedirs(all_tags_dir, exist_ok=True)
     all_tags_clusters_out = os.path.join(all_tags_dir, "clusters.csv")
     result_all_tags = subprocess.run(
         [sys.executable, script_path, "--input", csv_path, "--clusters-only", "--all-tags",
-         "--heatmap-out-dir", os.path.join(all_tags_dir, "heatmaps"),
+         "--cluster-network-out", os.path.join(all_tags_dir, "cluster_network.html"),
          "--clusters-out", all_tags_clusters_out],
         capture_output=True, text=True,
     )
@@ -402,51 +403,137 @@ def run_clustering_checks(tmpdir, script_path):
           f"got {len(all_tags_rows)} rows: {[row['tag_id'] for row in all_tags_rows]}")
 
 
+def _fully_connected_block(graph, tags, weight):
+    for a in tags:
+        for b in tags:
+            if a < b:
+                graph.add_edge(a, b, weight=weight)
+
+
 def run_min_cluster_size_checks():
-    # Direct unit-level test of cut_clusters against a hand-built
-    # fill_matrix, bypassing the CSV/incidence pipeline entirely -- same
-    # strategy as the order-independence test in
-    # tests/test_ao3_tag_visualizer.py. Ten synthetic tags in three
-    # designed blocks: X (4 tags), Y (4 tags), Z (2 tags), every
-    # within-block pair given the same association value, every
-    # cross-block pair 0.
-    tags = ["X1", "X2", "X3", "X4", "Y1", "Y2", "Y3", "Y4", "Z1", "Z2"]
-    value = 3.0
-    matrix = analysis.pd.DataFrame(0.0, index=tags, columns=tags)
-    for group in [["X1", "X2", "X3", "X4"], ["Y1", "Y2", "Y3", "Y4"], ["Z1", "Z2"]]:
-        for a in group:
-            for b in group:
-                if a != b:
-                    matrix.loc[a, b] = value
-    linkage_matrix = analysis.compute_linkage(matrix, method="average")
+    # Direct unit-level test of merge_small_communities against a hand-built
+    # nx.Graph, bypassing Louvain entirely -- same strategy as the
+    # order-independence test in tests/test_ao3_tag_visualizer.py. Ten
+    # synthetic tags in three designed blocks: X (4 tags), Y (4 tags), Z (2
+    # tags), each block a fully-connected clique, no cross-block edges.
+    import networkx as nx
 
-    # Without a minimum, n_clusters=3 recovers the 3 designed blocks,
-    # including the small 2-tag Z block.
-    clusters_no_min = analysis.cut_clusters(linkage_matrix, tags, n_clusters=3,
-                                             min_cluster_size=1)
-    sizes_no_min = sorted(clusters_no_min["cluster_id"].value_counts().tolist())
-    check("without min_cluster_size, n_clusters=3 recovers block sizes [2,4,4]",
-          sizes_no_min == [2, 4, 4], f"got {sizes_no_min}")
+    x_tags, y_tags, z_tags = ["X1", "X2", "X3", "X4"], ["Y1", "Y2", "Y3", "Y4"], ["Z1", "Z2"]
+    graph = nx.Graph()
+    graph.add_nodes_from(x_tags + y_tags + z_tags)
+    _fully_connected_block(graph, x_tags, 3.0)
+    _fully_connected_block(graph, y_tags, 3.0)
+    _fully_connected_block(graph, z_tags, 3.0)
+    communities = [set(x_tags), set(y_tags), set(z_tags)]
 
-    # With min_cluster_size=3, the 2-tag Z block can't stand on its own --
-    # n_clusters acts as a ceiling, not a fixed target, and the actual cut
-    # falls back to fewer, larger clusters.
-    clusters_min3 = analysis.cut_clusters(linkage_matrix, tags, n_clusters=3,
-                                           min_cluster_size=3)
-    sizes_min3 = clusters_min3["cluster_id"].value_counts().tolist()
-    check("min_cluster_size=3 forces fewer than 3 clusters (ceiling, not fixed target)",
-          clusters_min3["cluster_id"].nunique() < 3,
-          f"got {clusters_min3['cluster_id'].nunique()} clusters, sizes {sizes_min3}")
-    check("every resulting cluster meets the minimum size",
-          min(sizes_min3) >= 3, f"got sizes {sizes_min3}")
+    # min_cluster_size=1: nothing is undersized, communities pass through
+    # unchanged.
+    merged1 = analysis.merge_small_communities(communities, graph, min_cluster_size=1)
+    check("min_cluster_size=1 leaves the 3 designed blocks unchanged",
+          {frozenset(c) for c in merged1} == {frozenset(x_tags), frozenset(y_tags), frozenset(z_tags)},
+          f"got {[set(c) for c in merged1]}")
+
+    # min_cluster_size=3: the 2-tag Z block is undersized and fully isolated
+    # (zero cross-block edges), so it merges into the largest remaining
+    # community -- X and Y tie at size 4, tie-broken alphabetically (X1 < Y1).
+    merged3 = analysis.merge_small_communities(communities, graph, min_cluster_size=3)
+    check("min_cluster_size=3 merges isolated Z into the largest remaining community",
+          {frozenset(c) for c in merged3} == {frozenset(x_tags) | frozenset(z_tags), frozenset(y_tags)},
+          f"got {[set(c) for c in merged3]}")
+    check("every resulting community meets the minimum size",
+          min(len(c) for c in merged3) >= 3, f"got sizes {[len(c) for c in merged3]}")
 
     # An impossible constraint (min_cluster_size larger than the total tag
-    # count) falls back to a single cluster without erroring.
-    clusters_impossible = analysis.cut_clusters(linkage_matrix, tags, n_clusters=3,
-                                                 min_cluster_size=100)
-    check("min_cluster_size larger than total tags falls back to a single cluster",
-          clusters_impossible["cluster_id"].nunique() == 1,
-          f"got {clusters_impossible['cluster_id'].nunique()} clusters")
+    # count) collapses everything into a single community without erroring.
+    merged_impossible = analysis.merge_small_communities(communities, graph, min_cluster_size=100)
+    check("min_cluster_size larger than total tags collapses to a single community",
+          len(merged_impossible) == 1, f"got {[set(c) for c in merged_impossible]}")
+    check("no tag is lost when collapsing to a single community",
+          merged_impossible[0] == set(x_tags) | set(y_tags) | set(z_tags),
+          f"got {merged_impossible[0]}")
+
+    # Weight-aware merge: a small undersized community W is connected to
+    # both X and Y (not isolated), but more strongly to Y -- it should merge
+    # into Y, proving edge weight (not just size) drives the merge target.
+    weighted_graph = nx.Graph()
+    w_tags = ["W1", "W2"]
+    weighted_graph.add_nodes_from(x_tags + y_tags + w_tags)
+    _fully_connected_block(weighted_graph, x_tags, 3.0)
+    _fully_connected_block(weighted_graph, y_tags, 3.0)
+    weighted_graph.add_edge("W1", "W2", weight=3.0)
+    # W's total connection to X: 1.0. W's total connection to Y: 5.0.
+    weighted_graph.add_edge("W1", "X1", weight=1.0)
+    weighted_graph.add_edge("W2", "Y1", weight=2.0)
+    weighted_graph.add_edge("W2", "Y2", weight=3.0)
+    weighted_communities = [set(x_tags), set(y_tags), set(w_tags)]
+    merged_weighted = analysis.merge_small_communities(
+        weighted_communities, weighted_graph, min_cluster_size=3)
+    check("undersized community connected to two others merges into the "
+          "higher total-edge-weight one, not just the larger one",
+          {frozenset(c) for c in merged_weighted} == {frozenset(x_tags), frozenset(y_tags) | frozenset(w_tags)},
+          f"got {[set(c) for c in merged_weighted]}")
+
+
+def run_large_scale_community_checks():
+    # Regression test for the MemoryError this rewrite exists to fix:
+    # ~40,000 tags with two planted, fully-connected 30-tag cliques embedded
+    # in sparse random background edges. Builds pair_stats directly (no need
+    # to re-drive the CSV/incidence pipeline, which the two prior sparse-
+    # matrix fixes' regression tests already cover) and time-bounds
+    # build_cluster_graph + detect_communities, matching the convention of
+    # test_ao3_tag_visualizer.py's run_large_scale_sparsity_checks.
+    import random
+    import time
+
+    rng = random.Random(0)
+    n_tags = 40_000
+    tags = [f"additional_tags::Tag{i}" for i in range(n_tags)]
+
+    clique_a = tags[:30]
+    clique_b = tags[30:60]
+
+    rows = []
+    for clique in (clique_a, clique_b):
+        for i, a in enumerate(clique):
+            for b in clique[i + 1:]:
+                rows.append({"tag_a": a, "tag_b": b, "joint_count": 10,
+                             "count_a": 10, "count_b": 10, "lift": 5.0, "pmi": 2.32})
+
+    # Sparse random background noise: ~30,000 edges among all 40,000 tags,
+    # deliberately excluding the planted cliques' own pairs so the cliques
+    # stay the strongest signal in the graph. Kept well below AO3-scale edge
+    # counts -- Louvain's runtime (unlike the sparse-matrix ops this test
+    # complements) scales with edge count, not just node count, so this is
+    # sized to prove there's no dense blowup at 40,000 nodes while keeping
+    # the test itself fast.
+    for _ in range(30_000):
+        a, b = rng.sample(range(n_tags), 2)
+        if a > b:
+            a, b = b, a
+        rows.append({"tag_a": tags[a], "tag_b": tags[b], "joint_count": 2,
+                      "count_a": 5, "count_b": 5, "lift": 2.0, "pmi": 1.0})
+
+    pair_stats = analysis.pd.DataFrame(rows)
+    keep_tags = set(tags)
+
+    start = time.time()
+    graph = analysis.build_cluster_graph(pair_stats, keep_tags)
+    communities = analysis.detect_communities(graph)
+    elapsed = time.time() - start
+    check("large-scale (40,000-tag) community detection completes in under 60s",
+          elapsed < 60, f"took {elapsed:.2f}s")
+
+    check("large-scale graph has a node for every tag",
+          len(graph.nodes) == n_tags, f"got {len(graph.nodes)}")
+
+    # The planted cliques should each be (majority-overlapping with) some
+    # detected community -- Louvain may pull in a few noise-connected
+    # stragglers, but the clique itself should mostly land together.
+    for name, clique in [("A", clique_a), ("B", clique_b)]:
+        clique_set = set(clique)
+        best_overlap = max(len(clique_set & set(c)) for c in communities)
+        check(f"planted clique {name} (30 tags) is mostly recovered as one community",
+              best_overlap >= 25, f"best overlap: {best_overlap}/30")
 
 
 def main():
@@ -457,6 +544,7 @@ def main():
     run_frequency_checks(tmpdir, script_path)
     run_clustering_checks(tmpdir, script_path)
     run_min_cluster_size_checks()
+    run_large_scale_community_checks()
 
     print()
     if FAILURES:
