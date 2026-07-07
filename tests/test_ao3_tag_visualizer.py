@@ -384,6 +384,62 @@ def run_tag_pair_checks(tmpdir, script_path):
           f"got {order_stats.to_dict('records')}")
 
 
+def run_large_scale_sparsity_checks():
+    """Regression guard for the MemoryError a real --all-tags run hit: with
+    81,037 tags, the old dense tags x tags joint matrix needed 48.9 GiB
+    (81,037**2 * 8 bytes). tag_pair_statistics now computes joint via
+    scipy.sparse instead of a dense np.triu_indices sweep. This builds a
+    15,000-tag, 1,000-document incidence matrix (each document holding only
+    a handful of tags, matching realistic freeform-tag sparsity) -- a scale
+    where the old dense approach would need ~1.8 GiB just for the joint
+    matrix (15,000**2 * 8 bytes) despite the real data being tiny -- and
+    confirms both correctness (via two deliberately planted, hand-countable
+    tags) and that it completes quickly rather than attempting a huge
+    allocation."""
+    import time
+
+    import numpy as np
+
+    rng = np.random.default_rng(1234)
+    n_tags, n_docs, tags_per_doc = 15000, 1000, 8
+    tag_names = [f"additional_tags::Tag_{i}" for i in range(n_tags)]
+
+    rows = []
+    for work_id in range(n_docs):
+        chosen = rng.choice(n_tags, size=tags_per_doc, replace=False)
+        for c in chosen:
+            rows.append((f"work{work_id}", tag_names[c]))
+    # Plant two known tags co-occurring in exactly 50 documents, for a
+    # hand-verifiable correctness check at this scale.
+    for work_id in range(50):
+        rows.append((f"planted{work_id}", "additional_tags::KnownA"))
+        rows.append((f"planted{work_id}", "additional_tags::KnownB"))
+
+    tag_table = viz.pd.DataFrame(rows, columns=["work_id", "tag_id"])
+    keep_tags = set(tag_names) | {"additional_tags::KnownA", "additional_tags::KnownB"}
+    total_docs = n_docs + 50
+
+    incidence = viz.build_tag_incidence_matrix(tag_table, keep_tags)
+    start = time.time()
+    stats = viz.tag_pair_statistics(incidence, n_docs=total_docs)
+    elapsed = time.time() - start
+
+    check("large-scale (15,000-tag) tag_pair_statistics completes quickly "
+          "(would be a huge/slow dense allocation under the old approach)",
+          elapsed < 30, f"took {elapsed:.1f}s")
+
+    known_pair = stats[((stats["tag_a"] == "additional_tags::KnownA")
+                         & (stats["tag_b"] == "additional_tags::KnownB"))
+                        | ((stats["tag_a"] == "additional_tags::KnownB")
+                           & (stats["tag_b"] == "additional_tags::KnownA"))]
+    check("planted KnownA/KnownB pair is present with the correct joint_count at scale",
+          not known_pair.empty and known_pair.iloc[0]["joint_count"] == 50,
+          f"got {known_pair.to_dict('records')}")
+    check("planted pair is canonicalized alphabetically (KnownA < KnownB)",
+          not known_pair.empty and known_pair.iloc[0]["tag_a"] == "additional_tags::KnownA",
+          f"got {known_pair.to_dict('records')}")
+
+
 def main():
     tmpdir = tempfile.mkdtemp(prefix="ao3_viz_test_")
     csv_path = os.path.join(tmpdir, "ao3_tag_metadata.csv")
@@ -667,6 +723,9 @@ def main():
 
     # 10. --tag-pairs: dedicated fixture, own section (see run_tag_pair_checks).
     run_tag_pair_checks(tmpdir, script_path)
+
+    # 11. Large-scale sparsity regression (see run_large_scale_sparsity_checks).
+    run_large_scale_sparsity_checks()
 
     print()
     if FAILURES:
