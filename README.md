@@ -403,6 +403,51 @@ like `ao3_tag_visualizer.ipynb` — edit the Configuration cell, then run all ce
 order. The cluster network and cluster table render inline in addition to being
 saved to disk.
 
+## Fandom Labeling
+
+`ao3_tag_fandom_labels.py` labels an existing tag CSV (e.g. `ao3_tag_clusters.csv`,
+from `ao3_tag_analysis.py`) with the fandom(s) each tag is associated with. For
+every `tag_id`, it finds every work containing that tag in `ao3_tag_metadata.csv`
+and reports the top N fandoms those works belong to, by co-occurrence percentage
+— computed directly from the scrape, not guessed from the tag's name. A
+fandom-field tag trivially labels as itself near 100%; a cross-cutting trope tag
+(e.g. `additional_tags::Angst`) shows a spread across whichever fandoms it
+actually appears in.
+
+### Usage
+
+```bash
+python ao3_tag_fandom_labels.py
+```
+
+Reads `ao3_tag_metadata.csv` and `ao3_tag_clusters.csv`, and writes
+`ao3_tag_clusters_with_fandoms.csv` — every column from the input CSV, plus a new
+`top_fandoms` column, e.g. `Fandom A (75%), Fandom B (25%)`. The input
+`--clusters-csv` is never modified in place.
+
+```bash
+# Label a different CSV, with a different N and column name
+python ao3_tag_fandom_labels.py --clusters-csv my_tags.csv --top-n 5 --column-name fandoms
+```
+
+### All options
+
+```
+--input FILE          Metadata CSV to compute co-occurrence from
+                       (default: ao3_tag_metadata.csv)
+--clusters-csv FILE   Tag CSV to label -- must have a tag_id column
+                       (default: ao3_tag_clusters.csv)
+--top-n N              Number of top co-occurring fandoms to report per tag
+                       (default: 3)
+--column-name NAME     Name for the new fandom-label column (default: top_fandoms)
+--out FILE             Labeled CSV output (default: ao3_tag_clusters_with_fandoms.csv)
+-h, --help
+```
+
+A `tag_id` present in `--clusters-csv` but not found in `--input` (a stale or
+mismatched pairing) gets an empty label rather than an error, with a warning
+printed summarizing how many tags were affected.
+
 ## AO3 terms of service
 
 AO3 asks that scraping tools wait between requests to avoid overloading their
