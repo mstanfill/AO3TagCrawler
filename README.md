@@ -448,6 +448,13 @@ A `tag_id` present in `--clusters-csv` but not found in `--input` (a stale or
 mismatched pairing) gets an empty label rather than an error, with a warning
 printed summarizing how many tags were affected.
 
+### Notebook
+
+`ao3_tag_fandom_labels.ipynb` is a Jupyter notebook version of the same tool,
+structured like `ao3_tag_analysis.ipynb` — edit the Configuration cell, then
+run all cells in order. The labeled table renders inline in addition to being
+saved to disk.
+
 ## AO3 terms of service
 
 AO3 asks that scraping tools wait between requests to avoid overloading their
