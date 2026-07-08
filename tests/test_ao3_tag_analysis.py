@@ -536,6 +536,86 @@ def run_large_scale_community_checks():
               best_overlap >= 25, f"best overlap: {best_overlap}/30")
 
 
+def run_large_scale_merge_checks():
+    # Regression test for a real-world stall: merge_small_communities used
+    # to rescan every remaining community on every merge (an O(num
+    # communities) scan repeated per node/neighbor, plus a second one for
+    # the fully-isolated-source fallback), which is quadratic in the number
+    # of communities. --all-tags runs plausibly produce many small/isolated
+    # communities (noise tags with zero or one weak co-occurrence), and
+    # this was confirmed directly to take 46.9s at just 12,005 communities,
+    # extrapolating to an effectively unbounded stall at real (tens of
+    # thousands of tags) scale -- exactly what a real --all-tags
+    # --min-cluster-size 3 run hit. Reproduces the same two shapes that
+    # exposed it: many small communities weakly connected to a few large
+    # "hub" communities, and a worst case of thousands of fully isolated
+    # singleton communities (hitting the largest-remaining-community
+    # fallback path specifically).
+    import networkx as nx
+    import time
+
+    def hub_and_noise_graph(n_singletons):
+        graph = nx.Graph()
+        n_hub_communities = 5
+        hub_size = 50
+        communities = []
+        for i in range(n_singletons):
+            node = f"tag::S{i}"
+            graph.add_node(node)
+            communities.append({node})
+        for h in range(n_hub_communities):
+            nodes = [f"tag::H{h}_{j}" for j in range(hub_size)]
+            graph.add_nodes_from(nodes)
+            for a in range(len(nodes)):
+                for b in range(a + 1, len(nodes)):
+                    graph.add_edge(nodes[a], nodes[b], weight=1.0)
+            communities.append(set(nodes))
+            for i in range(200):
+                s = f"tag::S{(h * 200 + i) % n_singletons}"
+                graph.add_edge(s, nodes[0], weight=0.1)
+        return graph, communities
+
+    graph, communities = hub_and_noise_graph(30_000)
+    start = time.time()
+    merged = analysis.merge_small_communities(communities, graph, min_cluster_size=3)
+    elapsed = time.time() - start
+    check("large-scale (30,005 communities, hub+noise) merge completes in under 10s",
+          elapsed < 10, f"took {elapsed:.2f}s")
+    check("every resulting community meets the minimum size (hub+noise)",
+          all(len(c) >= 3 for c in merged), f"sizes: {sorted(len(c) for c in merged)}")
+    total_tags = sum(len(c) for c in communities)
+    check("no tag is lost merging the hub+noise graph",
+          sum(len(c) for c in merged) == total_tags,
+          f"expected {total_tags}, got {sum(len(c) for c in merged)}")
+
+    # Worst case for the isolated-source fallback: thousands of fully
+    # isolated singleton communities (zero edges at all -- e.g. a tag whose
+    # only pairs were filtered out or had pmi <= 0 everywhere), plus a
+    # couple of real communities to merge into.
+    n_isolated = 20_000
+    isolated_graph = nx.Graph()
+    isolated_communities = []
+    for i in range(n_isolated):
+        node = f"tag::Iso{i}"
+        isolated_graph.add_node(node)
+        isolated_communities.append({node})
+    big = [f"tag::Big{i}" for i in range(10)]
+    isolated_graph.add_nodes_from(big)
+    for a in range(len(big)):
+        for b in range(a + 1, len(big)):
+            isolated_graph.add_edge(big[a], big[b], weight=1.0)
+    isolated_communities.append(set(big))
+
+    start = time.time()
+    merged_isolated = analysis.merge_small_communities(isolated_communities, isolated_graph,
+                                                         min_cluster_size=3)
+    elapsed = time.time() - start
+    check("large-scale (20,001 fully-isolated communities) merge completes in under 10s",
+          elapsed < 10, f"took {elapsed:.2f}s")
+    check("fully-isolated communities all collapse into the one real community",
+          len(merged_isolated) == 1, f"got {len(merged_isolated)} communities")
+
+
 def main():
     tmpdir = tempfile.mkdtemp(prefix="ao3_analysis_test_")
     script_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -545,6 +625,7 @@ def main():
     run_clustering_checks(tmpdir, script_path)
     run_min_cluster_size_checks()
     run_large_scale_community_checks()
+    run_large_scale_merge_checks()
 
     print()
     if FAILURES:
