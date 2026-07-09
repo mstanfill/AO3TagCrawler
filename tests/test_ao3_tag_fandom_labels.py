@@ -148,6 +148,37 @@ def run_fandom_label_checks(tmpdir, script_path):
           labels_top2["additional_tags::Crossover_Trope"] == "Fandom X (50%), Fandom Y (33%)",
           f"got {labels_top2['additional_tags::Crossover_Trope']!r}")
 
+    # Regression: the scraper emits one row per (seed tag, work), so a work
+    # found via 3 seed tags appears 3 times in the metadata CSV. An earlier
+    # version exploded the fandom column from the raw (non-deduped) df while
+    # the denominator counted each work once, inflating this exact shape to
+    # "Fandom A (300%)" on real data.
+    dup_rows = [
+        base_row(9001, "Fandom A", character="DupBob", tag="Seed1"),
+        base_row(9001, "Fandom A", character="DupBob", tag="Seed2"),
+        base_row(9001, "Fandom A", character="DupBob", tag="Seed3"),
+        base_row(9002, "Fandom B", character="DupBob", tag="Seed1"),
+    ]
+    dup_df = viz.pd.DataFrame(dup_rows).astype(str)
+    dup_labels = labels_mod.compute_fandom_labels(dup_df, {"character::DupBob"}, top_n=3)
+    check("a work duplicated across 3 seed tags counts once, not three times",
+          dup_labels["character::DupBob"] == "Fandom A (50%), Fandom B (50%)",
+          f"got {dup_labels['character::DupBob']!r}")
+
+    # A genuine crossover work (two fandoms in one cell): the SUM may exceed
+    # 100 by design (the work genuinely belongs to both fandoms), but every
+    # individual percentage must stay <= 100.
+    crossover_rows = [
+        base_row(9101, "Fandom X, Fandom Y", character="XoverCarol"),
+        base_row(9102, "Fandom X", character="XoverCarol"),
+    ]
+    crossover_df = viz.pd.DataFrame(crossover_rows).astype(str)
+    crossover_labels = labels_mod.compute_fandom_labels(
+        crossover_df, {"character::XoverCarol"}, top_n=3)
+    check("a genuine crossover work counts toward each of its fandoms, individual values <= 100",
+          crossover_labels["character::XoverCarol"] == "Fandom X (100%), Fandom Y (50%)",
+          f"got {crossover_labels['character::XoverCarol']!r}")
+
     # CLI: build_arg_parser defaults.
     parser = labels_mod.build_arg_parser()
     default_args = parser.parse_args([])
