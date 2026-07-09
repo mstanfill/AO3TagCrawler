@@ -316,7 +316,12 @@ included, unchanged by the seed/non-seed split above)
 pyvis/vis-network machinery as `--tag-pairs`' network): every kept tag is a node,
 colored/grouped by its final cluster, with checkboxes to filter by cluster and a
 tag picker to narrow to specific tags and their direct connections. An edge is
-drawn between any pair with `pmi > 0` (co-occurs more than chance)
+drawn between any pair with `pmi > 0` (co-occurs more than chance). Unlike
+`--tag-pairs`' network, node positions are precomputed (each cluster arranged
+on its own circle, clusters placed on a grid) rather than settled live by
+client-side physics — at `--all-tags` scale (tens of thousands of nodes) a
+live force simulation is what makes a browser tab hang, independent of file
+size
 
 **`ao3_tag_clusters.csv`** — discrete cluster membership (`tag_id`, `field`,
 `label`, `cluster_id`), built from the same community-detection result the network

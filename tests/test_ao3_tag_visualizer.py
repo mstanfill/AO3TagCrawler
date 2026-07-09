@@ -454,6 +454,111 @@ def run_large_scale_sparsity_checks():
           f"got {known_pair.to_dict('records')}")
 
 
+def run_fast_populate_network_checks():
+    """Regression guard for a real hang: render_network's net.from_nx(graph)
+    checks node/edge membership via `x in self.node_ids`/`x in self.edges`
+    (plain Python lists in pyvis, not sets) on every single insertion --
+    confirmed directly this took 174s at just 10,000 nodes/50,000 edges,
+    and was still running after 66 minutes at 40,000 nodes/200,000 edges
+    (real --all-tags scale). _fast_populate_network replaces it, confirmed
+    to produce byte-identical net.nodes/net.edges/net.node_ids/net.node_map
+    for the same graph (nx.Graph can't have duplicate edges and every node
+    here is added exactly once, so none of pyvis's own duplicate-checking
+    is actually needed)."""
+    import time
+
+    from pyvis.network import Network
+
+    graph = viz.nx.Graph()
+    graph.add_node("a", label="A", group="1", color="#ff0000", title="node a", x=1.0, y=2.0)
+    graph.add_node("b", label="B", group="2", color="#00ff00", title="node b")
+    graph.add_node("c", label="C", group="1", color="#ff0000", title="node c")
+    graph.add_node("isolated", label="Isolated", group="3", color="#0000ff", title="lonely")
+    graph.add_edge("a", "b", weight=2.5, pmi=1.0, title="a-b")
+    graph.add_edge("b", "c", weight=1.5, pmi=0.5, title="b-c")
+
+    net_slow = Network()
+    net_slow.from_nx(graph.copy())
+
+    net_fast = Network()
+    viz._fast_populate_network(net_fast, graph.copy())
+
+    check("_fast_populate_network produces the same nodes as pyvis's from_nx",
+          sorted(net_slow.nodes, key=lambda n: n["id"]) == sorted(net_fast.nodes, key=lambda n: n["id"]),
+          f"slow: {net_slow.nodes}\nfast: {net_fast.nodes}")
+    check("_fast_populate_network produces the same node_ids (as a set) as from_nx",
+          set(net_slow.node_ids) == set(net_fast.node_ids))
+    check("_fast_populate_network produces the same node_map as from_nx",
+          net_slow.node_map == net_fast.node_map)
+    check("_fast_populate_network produces the same edges as pyvis's from_nx",
+          sorted(net_slow.edges, key=lambda e: (e["from"], e["to"]))
+          == sorted(net_fast.edges, key=lambda e: (e["from"], e["to"])),
+          f"slow: {net_slow.edges}\nfast: {net_fast.edges}")
+
+    # Large-scale timing regression: well under the 174s the old from_nx()
+    # took at this exact scale.
+    import random
+    rng = random.Random(0)
+    n_nodes, n_edges = 10000, 50000
+    big_graph = viz.nx.Graph()
+    for i in range(n_nodes):
+        big_graph.add_node(f"tag::{i}", label=str(i), group="1", color="#4C72B0", title=str(i))
+    added = 0
+    while added < n_edges:
+        a, b = rng.randrange(n_nodes), rng.randrange(n_nodes)
+        if a != b:
+            big_graph.add_edge(f"tag::{a}", f"tag::{b}", weight=1.0, pmi=1.0, title="x")
+            added += 1
+
+    net_big = Network()
+    start = time.time()
+    viz._fast_populate_network(net_big, big_graph)
+    elapsed = time.time() - start
+    check(f"_fast_populate_network completes in under 10s at {n_nodes} nodes/{n_edges} edges "
+          "(from_nx() took 174s at this exact scale)",
+          elapsed < 10, f"took {elapsed:.2f}s")
+    check("_fast_populate_network populated every node",
+          len(net_big.node_ids) == n_nodes, f"got {len(net_big.node_ids)}")
+
+
+def run_render_network_physics_checks(tmpdir):
+    """--physics toggle: physics=True (default) preserves the existing
+    barnesHut/stabilization behavior; physics=False (used by
+    ao3_tag_analysis.py's static cluster layout) disables physics entirely
+    and skips the now-meaningless stabilize-then-stop injection."""
+    graph = viz.nx.Graph()
+    graph.add_node("a", label="A", group="1", color="#4C72B0", title="a", x=0.0, y=0.0)
+    graph.add_node("b", label="B", group="1", color="#4C72B0", title="b", x=10.0, y=0.0)
+    graph.add_edge("a", "b", weight=1.0, pmi=1.0, title="a-b")
+
+    physics_path = os.path.join(tmpdir, "physics_network.html")
+    viz.render_network(graph, physics_path)
+    with open(physics_path, encoding="utf-8") as f:
+        physics_html = f.read()
+    # "stabilizationIterationsDone" alone isn't a reliable marker -- it also
+    # appears inside vis-network's own inlined (minified) library bundle
+    # regardless of physics, since cdn_resources="in_line" always embeds the
+    # full library. network.once("stabilizationIterationsDone" (unminified,
+    # with the literal "network.once(" call) is unique to our own injected
+    # _STABILIZE_THEN_STOP_SCRIPT.
+    stabilize_marker = 'network.once("stabilizationIterationsDone"'
+    check("physics=True (default) network HTML enables physics",
+          '"enabled": true' in physics_html or '"enabled":true' in physics_html)
+    check("physics=True network HTML injects the stabilize-then-stop script",
+          stabilize_marker in physics_html)
+
+    static_path = os.path.join(tmpdir, "static_network.html")
+    viz.render_network(graph, static_path, physics=False)
+    with open(static_path, encoding="utf-8") as f:
+        static_html = f.read()
+    check("physics=False network HTML disables physics",
+          '"enabled": false' in static_html or '"enabled":false' in static_html)
+    check("physics=False network HTML does NOT inject the stabilize-then-stop script",
+          stabilize_marker not in static_html)
+    check("physics=False network HTML still carries the fixed x/y positions through",
+          '"x": 0.0' in static_html or '"x": 0' in static_html)
+
+
 def main():
     tmpdir = tempfile.mkdtemp(prefix="ao3_viz_test_")
     csv_path = os.path.join(tmpdir, "ao3_tag_metadata.csv")
@@ -740,6 +845,10 @@ def main():
 
     # 11. Large-scale sparsity regression (see run_large_scale_sparsity_checks).
     run_large_scale_sparsity_checks()
+
+    # 12. render_network performance/physics-toggle regressions.
+    run_fast_populate_network_checks()
+    run_render_network_physics_checks(tmpdir)
 
     print()
     if FAILURES:
