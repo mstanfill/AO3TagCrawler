@@ -364,6 +364,15 @@ def run_clustering_checks(tmpdir, script_path):
     check("full run produces a non-empty cluster network HTML",
           os.path.exists(network_out) and os.path.getsize(network_out) > 0)
     check("full run produces the clusters CSV", os.path.exists(clusters_out))
+
+    with open(network_out, encoding="utf-8") as f:
+        network_html = f.read()
+    check("cluster network HTML disables physics (static layout, not client-side simulation)",
+          '"enabled": false' in network_html or '"enabled":false' in network_html)
+    check("cluster network HTML does not inject the (now-meaningless) stabilize-then-stop script",
+          'network.once("stabilizationIterationsDone"' not in network_html)
+    check("cluster network HTML nodes carry fixed x/y positions",
+          '"x":' in network_html.replace(" ", "") and '"y":' in network_html.replace(" ", ""))
     check("full run produces the frequency CSV", os.path.exists(freq_out))
 
     with open(clusters_out, newline="", encoding="utf-8") as f:
@@ -616,6 +625,100 @@ def run_large_scale_merge_checks():
           len(merged_isolated) == 1, f"got {len(merged_isolated)} communities")
 
 
+def run_cluster_layout_checks():
+    # Correctness: two clusters, far enough apart in the grid that their
+    # circles can't overlap (compute_cluster_layout's own invariant), each
+    # cluster's own nodes should stay close to their shared centroid.
+    import networkx as nx
+
+    graph = nx.Graph()
+    cluster_a = ["a1", "a2", "a3"]
+    cluster_b = ["b1", "b2"]
+    for tag in cluster_a + cluster_b:
+        graph.add_node(tag)
+    graph.add_edge("a1", "a2", weight=1.0)
+    graph.add_edge("a2", "a3", weight=1.0)
+    graph.add_edge("b1", "b2", weight=1.0)
+
+    clusters_df = analysis.pd.DataFrame(
+        [{"tag_id": t, "field": "x", "label": t, "cluster_id": 1} for t in cluster_a]
+        + [{"tag_id": t, "field": "x", "label": t, "cluster_id": 2} for t in cluster_b]
+    )
+
+    positions = analysis.compute_cluster_layout(graph, clusters_df)
+    check("compute_cluster_layout returns a position for every tag",
+          set(positions.keys()) == set(cluster_a + cluster_b), f"got {positions}")
+
+    def centroid(tags):
+        xs = [positions[t][0] for t in tags]
+        ys = [positions[t][1] for t in tags]
+        return sum(xs) / len(xs), sum(ys) / len(ys)
+
+    def max_dist_from(center, tags):
+        cx, cy = center
+        return max(((positions[t][0] - cx) ** 2 + (positions[t][1] - cy) ** 2) ** 0.5 for t in tags)
+
+    centroid_a, centroid_b = centroid(cluster_a), centroid(cluster_b)
+    radius_a = max_dist_from(centroid_a, cluster_a)
+    radius_b = max_dist_from(centroid_b, cluster_b)
+    centroid_dist = ((centroid_a[0] - centroid_b[0]) ** 2 + (centroid_a[1] - centroid_b[1]) ** 2) ** 0.5
+    check("the two clusters' bounding circles don't overlap",
+          centroid_dist > radius_a + radius_b,
+          f"centroid_dist={centroid_dist}, radius_a={radius_a}, radius_b={radius_b}")
+
+    # A size-1 cluster still gets a position (no division-by-zero/empty-set
+    # edge case in the single-node circular_layout path).
+    single_graph = nx.Graph()
+    single_graph.add_node("solo")
+    single_clusters_df = analysis.pd.DataFrame(
+        [{"tag_id": "solo", "field": "x", "label": "solo", "cluster_id": 1}])
+    single_positions = analysis.compute_cluster_layout(single_graph, single_clusters_df)
+    check("a single-node, single-cluster graph still gets a position",
+          "solo" in single_positions, f"got {single_positions}")
+
+
+def run_large_scale_cluster_layout_checks():
+    # Regression test for a real stall: compute_cluster_layout originally
+    # used nx.spring_layout per cluster, whose cost grows worse than
+    # linearly (confirmed directly: 500 nodes -> 2.4s, 4000 nodes -> 44.3s)
+    # -- and Louvain can plausibly collapse a large/weakly-structured graph
+    # into a handful of large communities (confirmed directly on a
+    # 40,000-tag/200,000-edge graph: communities of 5517, 5271, 5223, 5206,
+    # 4414 nodes each), which made the *whole* layout step's cost
+    # effectively unbounded (368.6s measured on exactly that shape).
+    # nx.circular_layout is O(1) per node with no iteration -- this
+    # reproduces the same "one dominant giant cluster" shape directly and
+    # confirms the fix holds.
+    import networkx as nx
+    import time
+
+    graph = nx.Graph()
+    giant_cluster = [f"tag::G{i}" for i in range(15000)]
+    graph.add_nodes_from(giant_cluster)
+    small_clusters = []
+    for c in range(20):
+        members = [f"tag::S{c}_{i}" for i in range(10)]
+        graph.add_nodes_from(members)
+        for a in range(len(members)):
+            for b in range(a + 1, len(members)):
+                graph.add_edge(members[a], members[b], weight=1.0)
+        small_clusters.append(members)
+
+    rows = [{"tag_id": t, "field": "x", "label": t, "cluster_id": 1} for t in giant_cluster]
+    for cluster_id, members in enumerate(small_clusters, start=2):
+        rows.extend({"tag_id": t, "field": "x", "label": t, "cluster_id": cluster_id} for t in members)
+    clusters_df = analysis.pd.DataFrame(rows)
+
+    start = time.time()
+    positions = analysis.compute_cluster_layout(graph, clusters_df)
+    elapsed = time.time() - start
+    check("compute_cluster_layout completes in under 10s with one 15,000-node cluster "
+          "(nx.spring_layout would take minutes on a single cluster this size)",
+          elapsed < 10, f"took {elapsed:.2f}s")
+    check("every tag in the giant-cluster fixture gets a position",
+          len(positions) == len(clusters_df), f"got {len(positions)} of {len(clusters_df)}")
+
+
 def main():
     tmpdir = tempfile.mkdtemp(prefix="ao3_analysis_test_")
     script_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -626,6 +729,8 @@ def main():
     run_min_cluster_size_checks()
     run_large_scale_community_checks()
     run_large_scale_merge_checks()
+    run_cluster_layout_checks()
+    run_large_scale_cluster_layout_checks()
 
     print()
     if FAILURES:

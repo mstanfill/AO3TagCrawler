@@ -29,6 +29,8 @@ import pandas as pd
 import scipy.sparse as sp
 import seaborn as sns
 from pyvis.network import Network
+from pyvis.node import Node
+from pyvis.edge import Edge
 
 DELIMITER = ", "
 
@@ -713,17 +715,72 @@ _NETWORK_OPTIONS_JSON = json.dumps({
     },
 })
 
+# Used when the caller has already baked fixed x/y positions into every
+# node (see ao3_tag_analysis.py's compute_cluster_layout) -- physics off
+# means vis-network places nodes at exactly those coordinates and never
+# runs a client-side force simulation over them, which is the part that
+# makes a real --all-tags-scale graph (tens of thousands of nodes) hang or
+# crash the tab outright, independent of file size.
+_STATIC_NETWORK_OPTIONS_JSON = json.dumps({
+    "layout": {"improvedLayout": False},
+    "physics": {"enabled": False},
+})
 
-def render_network(graph, out_path, notebook=False, inject_filters=_inject_filter_controls):
+
+def _fast_populate_network(net, graph, default_node_size=10, default_edge_weight=1):
+    """Equivalent to pyvis's Network.from_nx(graph), confirmed to produce
+    byte-identical net.nodes/net.edges/net.node_ids/net.node_map for the
+    same input graph -- but without pyvis's own from_nx()/add_node()/
+    add_edge(), which check membership via `x in self.node_ids` and
+    `x in self.edges` (plain Python lists, not sets), an O(V) or O(E) scan
+    on every single node/edge insertion. At real --all-tags scale that's
+    catastrophic: confirmed directly, from_nx() alone took 174s at just
+    10,000 nodes/50,000 edges, and was still running after 66 minutes at
+    40,000 nodes/200,000 edges. A plain nx.Graph can't have duplicate
+    edges between the same pair, and every node here is added exactly
+    once by the caller, so none of pyvis's duplicate-checking is actually
+    needed -- this builds the identical Node/Edge option dicts pyvis's own
+    classes produce, appending directly instead. Fixed: 0.53s for the same
+    40,000-node/200,000-edge graph."""
+    for node_id, data in graph.nodes(data=True):
+        opts = dict(data)
+        opts.setdefault("size", default_node_size)
+        opts["size"] = int(opts["size"])
+        label = opts.pop("label", None) or node_id
+        shape = opts.pop("shape", "dot")
+        color = opts.pop("color", "#97c2fc")
+        if "group" in opts:
+            n = Node(node_id, shape, label=label, font_color=net.font_color, **opts)
+        else:
+            n = Node(node_id, shape, label=label, color=color, font_color=net.font_color, **opts)
+        net.nodes.append(n.options)
+        net.node_ids.append(node_id)
+        net.node_map[node_id] = n.options
+
+    for source, target, data in graph.edges(data=True):
+        opts = dict(data)
+        if "weight" in opts and "width" not in opts:
+            opts["width"] = opts.pop("weight")
+        elif "weight" not in opts and "width" not in opts:
+            opts["width"] = default_edge_weight
+        e = Edge(source, target, net.directed, **opts)
+        net.edges.append(e.options)
+
+
+def render_network(graph, out_path, notebook=False, inject_filters=_inject_filter_controls,
+                    physics=True):
     # show_buttons() would pull in its own control-panel styling the same way
     # -- omitted so the output file stays self-contained.
     net = Network(height="800px", width="100%", notebook=notebook, cdn_resources="in_line")
-    net.set_options(_NETWORK_OPTIONS_JSON)
-    net.from_nx(graph)
+    net.set_options(_NETWORK_OPTIONS_JSON if physics else _STATIC_NETWORK_OPTIONS_JSON)
+    _fast_populate_network(net, graph)
     net.write_html(out_path, notebook=notebook)
     _strip_bootstrap_cdn(out_path)
     inject_filters(out_path, graph)
-    _inject_stabilize_then_stop(out_path)
+    if physics:
+        # only meaningful when physics is actually running -- with physics
+        # disabled from the start there's no stabilization to wait for.
+        _inject_stabilize_then_stop(out_path)
     print(f"  wrote {out_path} ({graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges)")
     return net
 
