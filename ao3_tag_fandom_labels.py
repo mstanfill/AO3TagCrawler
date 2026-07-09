@@ -41,7 +41,15 @@ def compute_fandom_labels(df, tag_ids, top_n):
     tag_table = tag_table[tag_table["tag_id"].isin(tag_ids)]
     tag_totals = tag_table.groupby("tag_id").size()
 
-    fandom_table = viz.explode_field(df, "fandom")[["work_id", "fandom"]]
+    # Dedupe by work_id before exploding, exactly as build_document_tag_table
+    # does internally for the numerator's other side -- the scraper emits one
+    # row per (seed tag, work), so a work found via 3 seed tags appears 3
+    # times in df. Without this dedup those duplicate rows each contribute
+    # the work's fandom to the merge below while tag_totals (built from the
+    # deduped table) counts the work once, inflating percentages up to
+    # 300%+ on real data.
+    deduped = df.drop_duplicates(subset="work_id", keep="first")
+    fandom_table = viz.explode_field(deduped, "fandom")[["work_id", "fandom"]]
 
     merged = tag_table.merge(fandom_table, on="work_id")
     counts = merged.groupby(["tag_id", "fandom"]).size().reset_index(name="count")
