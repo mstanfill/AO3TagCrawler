@@ -334,44 +334,74 @@ def compute_cluster_layout(graph, clusters_df, node_spacing=40):
 
     Arranges each cluster's nodes on its own circle (nx.circular_layout,
     radius scaled by sqrt(cluster size) so point density stays roughly
-    comparable across differently-sized clusters) and places the circles
-    on a grid, sized so no two clusters can overlap. Deliberately NOT
-    spring_layout, even per-cluster: confirmed directly that its cost
-    grows worse than linearly (500 nodes: 2.4s, 4000 nodes: 44.3s) and a
-    single oversized cluster -- entirely possible; Louvain can collapse a
-    noisy/weakly-structured graph into a handful of large communities --
-    would make the *whole* layout step's cost unbounded again, the exact
-    failure mode this function exists to avoid. circular_layout is a
-    closed-form O(1)-per-node placement with no iteration, confirmed
-    instant even for 40,000 nodes in a single cluster. This also produces
-    a more useful static layout than one global simulation would:
-    clusters read as clearly separated regions, matching what the
-    network's own cluster-filter checkboxes already let a viewer toggle.
+    comparable across differently-sized clusters) and shelf-packs the
+    circles: clusters sorted by diameter descending, laid out left-to-right
+    in rows of a target width of ~sqrt(total cluster area), each row as
+    tall as its largest member. Each circle is inscribed in its own
+    diameter-sized square cell, and rows never interleave, so no two
+    clusters can overlap. Deliberately NOT a uniform grid with every cell
+    sized by the LARGEST cluster: real Louvain output at --all-tags scale
+    is one or a few giant communities plus thousands of tiny (3-6 tag)
+    ones, and a uniform grid spread those across an ~800,000-px-wide
+    canvas (confirmed directly on a 50,290-node/5,006-cluster fixture) --
+    vis-network's fit() then zooms out so far that every node paints at
+    ~0.02px and the page looks completely blank. Shelf packing keeps the
+    span proportional to sqrt(total area) instead of
+    max_diameter * sqrt(cluster count).
+
+    Also deliberately NOT spring_layout for the per-cluster circles:
+    confirmed directly that its cost grows worse than linearly (500 nodes:
+    2.4s, 4000 nodes: 44.3s) and a single oversized cluster -- entirely
+    possible, per the Louvain shape above -- would make the whole layout
+    step's cost unbounded, the exact failure mode this function exists to
+    avoid. circular_layout is a closed-form O(1)-per-node placement with
+    no iteration, confirmed instant even for 40,000 nodes in one cluster.
+    This also produces a more useful static layout than one global
+    simulation would: clusters read as clearly separated regions, matching
+    what the network's own cluster-filter checkboxes already let a viewer
+    toggle.
 
     Returns {tag_id: (x, y)}."""
     cluster_groups = clusters_df.groupby("cluster_id")["tag_id"].apply(list)
 
-    layouts = {}
-    max_radius = 1.0
+    # (diameter_px, cluster_id, tag_ids, radius_units) -- one node_spacing
+    # of padding on every side so adjacent circles never touch.
+    entries = []
     for cluster_id, tag_ids in cluster_groups.items():
+        radius_units = max(1.0, math.sqrt(len(tag_ids)))
+        diameter_px = (2 * radius_units + 2) * node_spacing
+        entries.append((diameter_px, cluster_id, tag_ids, radius_units))
+    if not entries:
+        return {}
+
+    # Largest first (tie-break: cluster_id, for deterministic output);
+    # target row width of ~sqrt(total area) makes the packed result come
+    # out roughly square, which is what fit() displays best.
+    entries.sort(key=lambda e: (-e[0], e[1]))
+    total_area = sum(diameter * diameter for diameter, _, _, _ in entries)
+    target_width = max(entries[0][0], math.sqrt(total_area))
+
+    positions = {}
+    shelf_x = 0.0
+    shelf_y = 0.0
+    shelf_height = 0.0
+    for diameter, cluster_id, tag_ids, radius_units in entries:
+        if shelf_x > 0 and shelf_x + diameter > target_width:
+            shelf_y += shelf_height
+            shelf_x = 0.0
+            shelf_height = 0.0
+        center_x = shelf_x + diameter / 2
+        center_y = shelf_y + diameter / 2
+        shelf_x += diameter
+        shelf_height = max(shelf_height, diameter)
+
         subgraph = graph.subgraph(tag_ids)
-        radius = max(1.0, math.sqrt(len(tag_ids)))
         if len(subgraph) == 1:
             local_pos = {next(iter(subgraph)): (0.0, 0.0)}
         else:
-            local_pos = viz.nx.circular_layout(subgraph, scale=radius)
-        layouts[cluster_id] = (local_pos, radius)
-        max_radius = max(max_radius, radius)
-
-    grid_cols = math.ceil(math.sqrt(len(layouts)))
-    cell_size = (max_radius * 2 + 1.0) * node_spacing
-
-    positions = {}
-    for grid_index, (cluster_id, (local_pos, _)) in enumerate(layouts.items()):
-        cell_x = (grid_index % grid_cols) * cell_size
-        cell_y = (grid_index // grid_cols) * cell_size
+            local_pos = viz.nx.circular_layout(subgraph, scale=radius_units)
         for tag_id, (x, y) in local_pos.items():
-            positions[tag_id] = (x * node_spacing + cell_x, y * node_spacing + cell_y)
+            positions[tag_id] = (x * node_spacing + center_x, y * node_spacing + center_y)
     return positions
 
 

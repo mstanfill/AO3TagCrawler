@@ -245,7 +245,13 @@ _FILTER_PANEL_CSS = """
 <style>
 #ao3-filter-panel { font-family: sans-serif; font-size: 14px; padding: 10px 14px;
   border-bottom: 1px solid #ccc; background: #fafafa; }
-#ao3-filter-panel .ao3-cat-label { margin-right: 14px; white-space: nowrap; }
+/* Bounded + scrollable: harmless for a handful of checkboxes (no scrollbar
+   when content fits), essential for the cluster network, where real
+   --all-tags data can produce thousands of clusters -- an unbounded
+   checkbox list fills pages and pushes the graph canvas below the fold. */
+#ao3-cat-checkboxes { max-height: 108px; overflow-y: auto; }
+#ao3-filter-panel .ao3-cat-label { margin-right: 14px; white-space: nowrap;
+  display: inline-block; }
 #ao3-filter-panel .ao3-swatch { display: inline-block; width: 10px; height: 10px;
   border-radius: 50%; margin: 0 4px 0 4px; vertical-align: middle; }
 #ao3-tag-picker { margin-top: 8px; position: relative; }

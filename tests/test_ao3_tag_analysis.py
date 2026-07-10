@@ -373,6 +373,9 @@ def run_clustering_checks(tmpdir, script_path):
           'network.once("stabilizationIterationsDone"' not in network_html)
     check("cluster network HTML nodes carry fixed x/y positions",
           '"x":' in network_html.replace(" ", "") and '"y":' in network_html.replace(" ", ""))
+    check("cluster network HTML bounds the checkbox panel's height (thousands of "
+          "clusters would otherwise push the graph canvas below the fold)",
+          "#ao3-cat-checkboxes { max-height:" in network_html)
     check("full run produces the frequency CSV", os.path.exists(freq_out))
 
     with open(clusters_out, newline="", encoding="utf-8") as f:
@@ -717,6 +720,32 @@ def run_large_scale_cluster_layout_checks():
           elapsed < 10, f"took {elapsed:.2f}s")
     check("every tag in the giant-cluster fixture gets a position",
           len(positions) == len(clusters_df), f"got {len(positions)} of {len(clusters_df)}")
+
+    # Regression: layout compactness under the realistic Louvain shape (one
+    # giant community + thousands of tiny ones). An earlier uniform-grid
+    # version sized EVERY cell by the largest cluster, spreading this shape
+    # across an ~800,000-px canvas (confirmed on a 50,290-node/5,006-cluster
+    # fixture) -- vis-network's fit() then zooms out so far every node
+    # paints at ~0.02px and the rendered page looks completely blank.
+    # Shelf packing keeps the span near sqrt(total cluster area): for this
+    # fixture ~15,000px, where the old grid gave ~362,000px.
+    compact_graph = nx.Graph()
+    giant = [f"tag::G{i}" for i in range(10000)]
+    compact_graph.add_nodes_from(giant)
+    rows = [{"tag_id": t, "field": "x", "label": t, "cluster_id": 1} for t in giant]
+    for cluster_id in range(2, 2002):
+        members = [f"tag::S{cluster_id}_{i}" for i in range(4)]
+        compact_graph.add_nodes_from(members)
+        rows.extend({"tag_id": t, "field": "x", "label": t, "cluster_id": cluster_id}
+                    for t in members)
+    compact_df = analysis.pd.DataFrame(rows)
+    compact_positions = analysis.compute_cluster_layout(compact_graph, compact_df)
+    xs = [p[0] for p in compact_positions.values()]
+    ys = [p[1] for p in compact_positions.values()]
+    span = max(max(xs) - min(xs), max(ys) - min(ys))
+    check("giant-plus-2,000-tiny-clusters layout stays compact (span < 25,000px; "
+          "the old uniform grid spread it across ~362,000px)",
+          span < 25_000, f"got span {span:,.0f}px")
 
 
 def main():
