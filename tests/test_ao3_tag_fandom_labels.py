@@ -189,14 +189,18 @@ def run_fandom_label_checks(tmpdir, script_path):
     check("--column-name defaults to top_fandoms", default_args.column_name == "top_fandoms")
     check("--out defaults to ao3_tag_clusters_with_fandoms.csv",
           default_args.out == "ao3_tag_clusters_with_fandoms.csv")
+    check("--cluster-fandoms-out defaults to ao3_cluster_fandoms.csv",
+          default_args.cluster_fandoms_out == "ao3_cluster_fandoms.csv")
 
     # CLI: end-to-end run.
     clusters_csv_path = os.path.join(tmpdir, "clusters.csv")
     write_clusters_csv(clusters_csv_path, sorted(tag_ids))
     out_path = os.path.join(tmpdir, "labeled.csv")
+    cluster_fandoms_path = os.path.join(tmpdir, "cluster_fandoms.csv")
     result = subprocess.run(
         [sys.executable, script_path, "--input", csv_path, "--clusters-csv", clusters_csv_path,
-         "--top-n", "2", "--out", out_path],
+         "--top-n", "2", "--out", out_path,
+         "--cluster-fandoms-out", cluster_fandoms_path],
         capture_output=True, text=True,
     )
     check("main() exits 0", result.returncode == 0, f"stderr: {result.stderr}")
@@ -215,17 +219,97 @@ def run_fandom_label_checks(tmpdir, script_path):
           out_rows["additional_tags::Crossover_Trope"]["top_fandoms"] == "Fandom X (50%), Fandom Y (33%)",
           f"got {out_rows['additional_tags::Crossover_Trope']['top_fandoms']!r}")
 
+    check("CLI run writes the per-cluster fandom summary CSV",
+          os.path.exists(cluster_fandoms_path))
+    with open(cluster_fandoms_path, newline="", encoding="utf-8") as f:
+        summary_rows = list(csv.DictReader(f))
+    check("cluster summary CSV has [cluster_id, n_tags, n_works, top_fandoms] columns",
+          summary_rows and list(summary_rows[0].keys()) == ["cluster_id", "n_tags", "n_works", "top_fandoms"],
+          f"got {list(summary_rows[0].keys()) if summary_rows else summary_rows}")
+    check("cluster summary CSV has one row per cluster in the input",
+          len(summary_rows) == 5, f"got {len(summary_rows)} rows")
+
     # --column-name.
     out_path2 = os.path.join(tmpdir, "labeled2.csv")
     result2 = subprocess.run(
         [sys.executable, script_path, "--input", csv_path, "--clusters-csv", clusters_csv_path,
-         "--column-name", "fandom_guess", "--out", out_path2],
+         "--column-name", "fandom_guess", "--out", out_path2,
+         "--cluster-fandoms-out", os.path.join(tmpdir, "cluster_fandoms2.csv")],
         capture_output=True, text=True,
     )
     check("main() with --column-name exits 0", result2.returncode == 0, f"stderr: {result2.stderr}")
     with open(out_path2, newline="", encoding="utf-8") as f:
         header = next(csv.reader(f))
     check("--column-name renames the new column", "fandom_guess" in header, f"got {header}")
+
+    # A clusters CSV without a cluster_id column: per-tag labeling still
+    # runs, the per-cluster summary is skipped with a note, exit code 0.
+    no_cluster_csv = os.path.join(tmpdir, "no_cluster_col.csv")
+    with open(no_cluster_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["tag_id"])
+        writer.writerow(["character::Bob"])
+    no_cluster_summary_path = os.path.join(tmpdir, "no_cluster_summary.csv")
+    result3 = subprocess.run(
+        [sys.executable, script_path, "--input", csv_path, "--clusters-csv", no_cluster_csv,
+         "--out", os.path.join(tmpdir, "no_cluster_labeled.csv"),
+         "--cluster-fandoms-out", no_cluster_summary_path],
+        capture_output=True, text=True,
+    )
+    check("a clusters CSV without cluster_id still exits 0",
+          result3.returncode == 0, f"stderr: {result3.stderr}")
+    check("missing cluster_id column skips the summary with a note",
+          "no cluster_id column" in result3.stderr and not os.path.exists(no_cluster_summary_path),
+          f"stderr: {result3.stderr}")
+
+
+def run_cluster_summary_checks():
+    # Direct unit test of compute_cluster_fandom_summary against grouped
+    # clusters (several tags sharing one cluster_id), which the CLI fixture
+    # above doesn't exercise (write_clusters_csv gives each tag its own
+    # cluster).
+    rows = []
+    # Cluster 1 = {Bob, Angst}: works 1-3 carry BOTH tags (Fandom A), work
+    # 4 only Angst (Fandom B) -- the cluster's work pool is 4 distinct
+    # stories, not 7 tag-occurrences.
+    for wid in (1, 2, 3):
+        rows.append(base_row(wid, "Fandom A", character="Bob", additional_tags="Angst"))
+    rows.append(base_row(4, "Fandom B", additional_tags="Angst"))
+    # Cluster 2 = {Crossover_Trope}: 6 works across three fandoms (3/2/1).
+    for wid, fandom in [(5, "Fandom X"), (6, "Fandom X"), (7, "Fandom X"),
+                         (8, "Fandom Y"), (9, "Fandom Y"), (10, "Fandom Z")]:
+        rows.append(base_row(wid, fandom, additional_tags="Crossover_Trope"))
+    df = viz.pd.DataFrame(rows).astype(str)
+
+    clusters_df = viz.pd.DataFrame([
+        {"tag_id": "character::Bob", "cluster_id": "1"},
+        {"tag_id": "additional_tags::Angst", "cluster_id": "1"},
+        {"tag_id": "additional_tags::Crossover_Trope", "cluster_id": "2"},
+        {"tag_id": "additional_tags::Nonexistent", "cluster_id": "3"},
+        {"tag_id": "additional_tags::AlsoNonexistent", "cluster_id": "10"},
+    ])
+
+    summary = labels_mod.compute_cluster_fandom_summary(df, clusters_df, top_n=2)
+    by_cluster = {row["cluster_id"]: row for _, row in summary.iterrows()}
+
+    check("a work with several of the cluster's tags counts once (4 works, not 7)",
+          by_cluster["1"]["n_works"] == 4, f"got {by_cluster['1'].to_dict()}")
+    check("cluster-level fandom percentages use the cluster's whole work pool",
+          by_cluster["1"]["top_fandoms"] == "Fandom A (75%), Fandom B (25%)",
+          f"got {by_cluster['1']['top_fandoms']!r}")
+    check("cluster summary respects top_n truncation",
+          by_cluster["2"]["top_fandoms"] == "Fandom X (50%), Fandom Y (33%)",
+          f"got {by_cluster['2']['top_fandoms']!r}")
+    check("n_tags counts the cluster's distinct tags",
+          by_cluster["1"]["n_tags"] == 2 and by_cluster["2"]["n_tags"] == 1,
+          f"got {summary.to_dict('records')}")
+    check("a cluster whose tags never appear in the metadata keeps its row "
+          "with n_works=0 and an empty label",
+          by_cluster["3"]["n_works"] == 0 and by_cluster["3"]["top_fandoms"] == "",
+          f"got {by_cluster['3'].to_dict()}")
+    check("clusters are ordered numerically (2 before 10), not lexicographically",
+          summary["cluster_id"].tolist() == ["1", "2", "3", "10"],
+          f"got {summary['cluster_id'].tolist()}")
 
 
 def run_large_scale_checks():
@@ -280,6 +364,7 @@ def main():
                                 "ao3_tag_fandom_labels.py")
 
     run_fandom_label_checks(tmpdir, script_path)
+    run_cluster_summary_checks()
     run_large_scale_checks()
 
     print()

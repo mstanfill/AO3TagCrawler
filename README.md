@@ -419,16 +419,28 @@ fandom-field tag trivially labels as itself near 100%; a cross-cutting trope tag
 (e.g. `additional_tags::Angst`) shows a spread across whichever fandoms it
 actually appears in.
 
+It also writes a **per-cluster summary**: for each `cluster_id`, it pools every
+work containing *any* of the cluster's tags (counted once per cluster, no matter
+how many of its tags a work matches) and ranks the fandoms of those works by
+percent of works — which fandoms a whole cluster is about, rather than tag by tag.
+
 ### Usage
 
 ```bash
 python ao3_tag_fandom_labels.py
 ```
 
-Reads `ao3_tag_metadata.csv` and `ao3_tag_clusters.csv`, and writes
-`ao3_tag_clusters_with_fandoms.csv` — every column from the input CSV, plus a new
-`top_fandoms` column, e.g. `Fandom A (75%), Fandom B (25%)`. The input
+Reads `ao3_tag_metadata.csv` and `ao3_tag_clusters.csv`, and writes:
+
+**`ao3_tag_clusters_with_fandoms.csv`** — every column from the input CSV, plus a
+new `top_fandoms` column, e.g. `Fandom A (75%), Fandom B (25%)`. The input
 `--clusters-csv` is never modified in place.
+
+**`ao3_cluster_fandoms.csv`** — one row per cluster: `cluster_id`, `n_tags` (the
+cluster's distinct tags), `n_works` (distinct works containing any of them), and
+`top_fandoms` in the same `Fandom A (62%), …` format, percentages out of the
+cluster's whole work pool. Skipped with a note if the input CSV has no
+`cluster_id` column.
 
 ```bash
 # Label a different CSV, with a different N and column name
@@ -438,14 +450,16 @@ python ao3_tag_fandom_labels.py --clusters-csv my_tags.csv --top-n 5 --column-na
 ### All options
 
 ```
---input FILE          Metadata CSV to compute co-occurrence from
-                       (default: ao3_tag_metadata.csv)
---clusters-csv FILE   Tag CSV to label -- must have a tag_id column
-                       (default: ao3_tag_clusters.csv)
---top-n N              Number of top co-occurring fandoms to report per tag
-                       (default: 3)
---column-name NAME     Name for the new fandom-label column (default: top_fandoms)
---out FILE             Labeled CSV output (default: ao3_tag_clusters_with_fandoms.csv)
+--input FILE                Metadata CSV to compute co-occurrence from
+                             (default: ao3_tag_metadata.csv)
+--clusters-csv FILE         Tag CSV to label -- must have a tag_id column
+                             (default: ao3_tag_clusters.csv)
+--top-n N                   Number of top co-occurring fandoms to report, per tag
+                             and per cluster (default: 3)
+--column-name NAME          Name for the new fandom-label column (default: top_fandoms)
+--out FILE                  Labeled CSV output (default: ao3_tag_clusters_with_fandoms.csv)
+--cluster-fandoms-out FILE  Per-cluster fandom summary CSV output
+                             (default: ao3_cluster_fandoms.csv)
 -h, --help
 ```
 
