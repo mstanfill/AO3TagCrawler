@@ -224,7 +224,9 @@ written in three formats: the PNG image, the exact matrix as CSV (for
 sorting/filtering in Excel, Sheets, or pandas — the PNG becomes unscannable
 once there are hundreds of seed-tag rows), and a self-contained sortable HTML
 table with the same color scale, sticky row/column headers, click-to-sort on
-any column, and a live search box for seed tags. Note: a same-name cell (seed
+any column, click-a-row-label to sort that row's values across the columns
+(biggest leftmost, click again to flip), and a live search box for seed tags.
+Note: a same-name cell (seed
 tag `Angst` × displayed tag `Angst`) below 100% is not a bug — see
 [Tag Wrangling](#tag-wrangling)
 

@@ -217,7 +217,8 @@ thead th { position: sticky; top: 0; z-index: 2; background: #f0f0f0;
   cursor: pointer; }
 thead th:hover { background: #e0e8f0; }
 tbody th { position: sticky; left: 0; z-index: 1; background: #f0f0f0;
-  text-align: left; font-weight: normal; }
+  text-align: left; font-weight: normal; cursor: pointer; }
+tbody th:hover { background: #e0e8f0; }
 thead th:first-child { left: 0; z-index: 4; }
 </style>
 """
@@ -227,16 +228,33 @@ _HEATMAP_SORT_SCRIPT = """
 (function () {
   const table = document.getElementById("hm-table");
   const tbody = table.tBodies[0];
-  const headers = table.tHead.rows[0].cells;
-  let sortCol = null;
+  const headerRow = table.tHead.rows[0];
+  // Toggle state is keyed by the clicked header ELEMENT, never by its
+  // index: column reordering moves headers around, so a stored index
+  // would silently point at a different column on the next click.
+  let lastSorted = null;
   let ascending = false;
 
-  function sortRows(col) {
-    // Column 0 is the row-label column: sort alphabetically (ascending
-    // first). Data columns sort by the numeric data-v sort key
-    // (descending first); blank/NaN cells always sink to the bottom.
-    if (sortCol === col) { ascending = !ascending; }
-    else { sortCol = col; ascending = (col === 0); }
+  function toggleDirection(th, descendingFirst) {
+    if (lastSorted === th) { ascending = !ascending; }
+    else { lastSorted = th; ascending = !descendingFirst; }
+  }
+
+  function compareKeys(araw, braw, asc) {
+    // Blank/NaN sort keys always sink to the end, whichever direction.
+    if (araw === "" && braw === "") return 0;
+    if (araw === "") return 1;
+    if (braw === "") return -1;
+    return asc ? (araw - braw) : (braw - araw);
+  }
+
+  function sortRows(th) {
+    // The clicked header's CURRENT index -- computed at click time, since
+    // sortColumns() may have moved it since the page loaded. Column 0 is
+    // the corner header: sort row labels alphabetically (ascending
+    // first); data columns sort by data-v (descending first).
+    const col = th.cellIndex;
+    toggleDirection(th, col !== 0);
     const rows = Array.from(tbody.rows);
     rows.sort(function (a, b) {
       if (col === 0) {
@@ -244,19 +262,43 @@ _HEATMAP_SORT_SCRIPT = """
         const bv = b.cells[0].textContent.toLowerCase();
         return ascending ? av.localeCompare(bv) : bv.localeCompare(av);
       }
-      const araw = a.cells[col].dataset.v;
-      const braw = b.cells[col].dataset.v;
-      if (araw === "" && braw === "") return 0;
-      if (araw === "") return 1;
-      if (braw === "") return -1;
-      return ascending ? (araw - braw) : (braw - araw);
+      return compareKeys(a.cells[col].dataset.v, b.cells[col].dataset.v, ascending);
     });
     rows.forEach(function (r) { tbody.appendChild(r); });
   }
 
-  for (let i = 0; i < headers.length; i++) {
-    headers[i].addEventListener("click", function () { sortRows(i); });
+  function sortColumns(rowTh) {
+    // Reorder COLUMNS by the clicked row's values, biggest leftmost
+    // (click the same row label again to flip; blanks always last).
+    // The permutation is applied to the header row and every body row by
+    // re-appending each row's cells -- the row-label <th> stays at 0.
+    toggleDirection(rowTh, true);
+    const rowCells = rowTh.parentNode.cells;
+    const order = [];
+    for (let i = 1; i < rowCells.length; i++) order.push(i);
+    order.sort(function (a, b) {
+      return compareKeys(rowCells[a].dataset.v, rowCells[b].dataset.v, ascending);
+    });
+    const allRows = [headerRow].concat(Array.from(tbody.rows));
+    for (const row of allRows) {
+      const cells = Array.from(row.cells);
+      const fragment = document.createDocumentFragment();
+      for (const sourceIndex of order) fragment.appendChild(cells[sourceIndex]);
+      row.appendChild(fragment);
+    }
   }
+
+  // Event delegation (not per-cell listeners): both sorts move cells
+  // around, and delegation guarantees handlers always see the clicked
+  // element's live position.
+  table.tHead.addEventListener("click", function (event) {
+    const th = event.target.closest("th");
+    if (th) sortRows(th);
+  });
+  tbody.addEventListener("click", function (event) {
+    const th = event.target.closest("th");
+    if (th) sortColumns(th);
+  });
 
   document.getElementById("hm-search").addEventListener("input", function () {
     const q = this.value.trim().toLowerCase();
@@ -274,9 +316,11 @@ def render_heatmap_html(matrix, field, out_path, normalized=False, cmap="viridis
     """The heatmap as a self-contained sortable/searchable HTML table --
     same signature, colormap, value format, and NaN masking as
     render_heatmap, but navigable where a huge PNG can only be scanned:
-    sticky row/column headers, click any column header to sort by it
-    (click again to flip; blanks always last; the corner header sorts
-    row labels alphabetically), and a live search box filtering rows.
+    sticky row/column headers, click any column header to sort the rows by
+    it, click any row label to sort the COLUMNS by that row's values
+    (biggest leftmost -- click again to flip either sort; blanks always
+    last; the corner header sorts row labels alphabetically), and a live
+    search box filtering rows.
     Row labels and column values are arbitrary AO3 text, so everything
     is HTML-escaped and the sort keys travel in data-v attributes rather
     than being parsed back out of display text."""
@@ -339,7 +383,8 @@ def render_heatmap_html(matrix, field, out_path, normalized=False, cmap="viridis
         f"<span>{format(vmin, fmt) if fmt != 'd' else int(vmin)}</span>"
         f'<span id="hm-legend-bar" style="background:linear-gradient(to right, {gradient_stops});"></span>'
         f"<span>{format(vmax, fmt) if fmt != 'd' else int(vmax)}</span>"
-        "<span style=\"margin-left:14px;color:#777;\">click a column header to sort</span>"
+        "<span style=\"margin-left:14px;color:#777;\">click a column header to sort "
+        "rows &middot; click a row label to sort columns</span>"
         "</div>\n"
         '<div id="hm-scroll"><table id="hm-table">'
         f"<thead><tr><th>{corner}</th>{header_cells}</tr></thead>"
