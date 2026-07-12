@@ -71,58 +71,11 @@ def compute_fandom_labels(df, tag_ids, top_n):
     return labels
 
 
-def compute_cluster_fandom_summary(df, clusters_df, top_n):
-    """Per-cluster counterpart to compute_fandom_labels: for each
-    cluster_id, pools every work containing ANY of the cluster's tags --
-    counted once per cluster no matter how many of its tags the work
-    matches -- and ranks the fandoms of those works by percent of works
-    (tie-break: alphabetically smallest fandom name). Same denominator
-    semantics as the per-tag labels: the percentage base is the cluster's
-    full work pool, so fandom-less works keep sums under 100 and
-    multi-fandom crossover works can push sums above 100, while every
-    individual value stays <= 100. Returns a DataFrame
-    [cluster_id, n_tags, n_works, top_fandoms] with one row per cluster
-    in clusters_df -- a cluster whose tags never appear in df keeps its
-    row with n_works=0 and an empty label rather than vanishing."""
-    cluster_by_tag = clusters_df.drop_duplicates("tag_id").set_index("tag_id")["cluster_id"]
-
-    tag_table = viz.build_document_tag_table(df, fields=analysis.ALL_METADATA_FIELDS)
-    tag_table = tag_table[tag_table["tag_id"].isin(cluster_by_tag.index)]
-    cluster_works = tag_table.assign(cluster_id=tag_table["tag_id"].map(cluster_by_tag))
-    # A work with several of the cluster's tags is still one story.
-    cluster_works = cluster_works[["cluster_id", "work_id"]].drop_duplicates()
-    cluster_totals = cluster_works.groupby("cluster_id").size()
-
-    # Deduped for the same reason as compute_fandom_labels: the scraper
-    # emits one row per (seed tag, work).
-    deduped = df.drop_duplicates(subset="work_id", keep="first")
-    fandom_table = viz.explode_field(deduped, "fandom")[["work_id", "fandom"]]
-
-    merged = cluster_works.merge(fandom_table, on="work_id")
-    counts = merged.groupby(["cluster_id", "fandom"]).size().reset_index(name="count")
-    counts["pct"] = counts["count"] / counts["cluster_id"].map(cluster_totals) * 100
-
-    counts = counts.sort_values(["cluster_id", "count", "fandom"], ascending=[True, False, True])
-    top = counts.groupby("cluster_id", sort=False).head(top_n)
-    top = top.assign(entry=top["fandom"] + " (" + top["pct"].round(0).astype(int).astype(str) + "%)")
-    labels = top.groupby("cluster_id", sort=False)["entry"].apply(", ".join)
-
-    n_tags = clusters_df.groupby("cluster_id")["tag_id"].nunique()
-    summary = pd.DataFrame({
-        "cluster_id": n_tags.index,
-        "n_tags": n_tags.values,
-        "n_works": n_tags.index.map(cluster_totals).fillna(0).astype(int),
-        "top_fandoms": n_tags.index.map(labels).fillna(""),
-    })
-    # ao3_tag_clusters.csv's cluster_ids are integers, but they arrive as
-    # strings when the CSV is read with dtype=str -- order numerically when
-    # every id parses as a number, so 2 sorts before 10.
-    numeric_order = pd.to_numeric(summary["cluster_id"], errors="coerce")
-    if numeric_order.notna().all():
-        summary = summary.iloc[numeric_order.argsort(kind="stable").to_numpy()]
-    else:
-        summary = summary.sort_values("cluster_id")
-    return summary.reset_index(drop=True)
+# Moved into ao3_tag_analysis.py (whose cluster meta-network needs the same
+# per-cluster fandom labels; this module already imports it, so the import
+# can't go the other way) -- re-exported here so this module's API and its
+# callers/tests are unchanged.
+compute_cluster_fandom_summary = analysis.compute_cluster_fandom_summary
 
 
 def build_arg_parser():

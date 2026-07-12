@@ -212,6 +212,9 @@ def run_frequency_checks(tmpdir, script_path):
     check("--cluster-resolution defaults to 1.0", default_args.cluster_resolution == 1.0)
     check("--cluster-network-out defaults to ao3_tag_cluster_network.html",
           default_args.cluster_network_out == "ao3_tag_cluster_network.html")
+    check("--cluster-meta-network-out defaults to ao3_tag_cluster_meta_network.html",
+          default_args.cluster_meta_network_out == "ao3_tag_cluster_meta_network.html")
+    check("--gexf-out defaults to None (opt-in)", default_args.gexf_out is None)
     check("--all-tags defaults to False", default_args.all_tags is False)
     check("--min-cluster-size defaults to 1", default_args.min_cluster_size == 1)
     check("--frequency-only defaults to False", default_args.frequency_only is False)
@@ -251,6 +254,8 @@ def run_frequency_checks(tmpdir, script_path):
           not os.path.exists(os.path.join(cli_dir, "ao3_tag_clusters.csv")))
     check("--frequency-only does NOT produce the cluster network HTML",
           not os.path.exists(os.path.join(cli_dir, "ao3_tag_cluster_network.html")))
+    check("--frequency-only does NOT produce the cluster meta-network HTML",
+          not os.path.exists(os.path.join(cli_dir, "ao3_tag_cluster_meta_network.html")))
 
     clusters_only_dir = os.path.join(tmpdir, "clusters_only_run")
     os.makedirs(clusters_only_dir, exist_ok=True)
@@ -259,6 +264,7 @@ def run_frequency_checks(tmpdir, script_path):
         [sys.executable, script_path, "--input", csv_path, "--clusters-only",
          "--frequency-out", clusters_only_freq_out,
          "--cluster-network-out", os.path.join(clusters_only_dir, "cluster_network.html"),
+         "--cluster-meta-network-out", os.path.join(clusters_only_dir, "meta_network.html"),
          "--clusters-out", os.path.join(clusters_only_dir, "clusters.csv")],
         capture_output=True, text=True,
     )
@@ -348,22 +354,55 @@ def run_clustering_checks(tmpdir, script_path):
           {frozenset(g) for g in cluster_groups} == {frozenset(block_a_tags), frozenset(block_b_tags)},
           f"got {cluster_groups}")
 
-    # Full CLI run (defaults) produces all three outputs.
+    # Full CLI run (defaults + --gexf-out) produces every output.
     full_dir = os.path.join(tmpdir, "full_run")
     os.makedirs(full_dir, exist_ok=True)
     freq_out = os.path.join(full_dir, "frequency.csv")
     network_out = os.path.join(full_dir, "cluster_network.html")
+    meta_network_out = os.path.join(full_dir, "meta_network.html")
+    gexf_out = os.path.join(full_dir, "network.gexf")
     clusters_out = os.path.join(full_dir, "clusters.csv")
     result = subprocess.run(
         [sys.executable, script_path, "--input", csv_path,
          "--frequency-out", freq_out, "--cluster-network-out", network_out,
+         "--cluster-meta-network-out", meta_network_out,
+         "--gexf-out", gexf_out,
          "--clusters-out", clusters_out, "--top-tags", "13"],
         capture_output=True, text=True,
     )
     check("full default main() run exits 0", result.returncode == 0, f"stderr: {result.stderr}")
     check("full run produces a non-empty cluster network HTML",
           os.path.exists(network_out) and os.path.getsize(network_out) > 0)
+    check("full run produces a non-empty cluster meta-network HTML",
+          os.path.exists(meta_network_out) and os.path.getsize(meta_network_out) > 0)
+    check("--gexf-out produces a GEXF file", os.path.exists(gexf_out))
     check("full run produces the clusters CSV", os.path.exists(clusters_out))
+
+    # The GEXF round-trips through networkx with the analysis attributes
+    # intact -- this is what Gephi will read.
+    gexf_graph = viz.nx.read_gexf(gexf_out)
+    check("GEXF round-trips with all 13 tag nodes",
+          gexf_graph.number_of_nodes() == 13, f"got {gexf_graph.number_of_nodes()}")
+    gexf_bob = gexf_graph.nodes["character::Bob"]
+    check("GEXF nodes carry label/field/cluster_id for Gephi partitioning",
+          gexf_bob.get("field") == "character" and isinstance(gexf_bob.get("cluster_id"), int),
+          f"got {gexf_bob}")
+    gexf_edge = list(gexf_graph.edges(data=True))[0]
+    check("GEXF edges carry weight/lift/joint_count",
+          all(key in gexf_edge[2] for key in ("weight", "lift", "joint_count")),
+          f"got {gexf_edge}")
+
+    # Meta network on the two-block fixture: one meta node per cluster,
+    # labeled with the block's fandom (Alpha/Beta at 100% co-occurrence),
+    # and no edges (the blocks never co-occur).
+    with open(meta_network_out, encoding="utf-8") as f:
+        meta_html = f.read()
+    check("meta network HTML has a node labeled with cluster 1's top fandom",
+          "1: Alpha" in meta_html, "expected label '1: Alpha'")
+    check("meta network HTML has a node labeled with cluster 2's top fandom",
+          "2: Beta" in meta_html, "expected label '2: Beta'")
+    check("meta network HTML keeps physics enabled (small graph, organic layout)",
+          '"enabled": true' in meta_html or '"enabled":true' in meta_html)
 
     with open(network_out, encoding="utf-8") as f:
         network_html = f.read()
@@ -403,6 +442,7 @@ def run_clustering_checks(tmpdir, script_path):
     result_all_tags = subprocess.run(
         [sys.executable, script_path, "--input", csv_path, "--clusters-only", "--all-tags",
          "--cluster-network-out", os.path.join(all_tags_dir, "cluster_network.html"),
+         "--cluster-meta-network-out", os.path.join(all_tags_dir, "meta_network.html"),
          "--clusters-out", all_tags_clusters_out],
         capture_output=True, text=True,
     )
@@ -547,6 +587,37 @@ def run_large_scale_community_checks():
         check(f"planted clique {name} (30 tags) is mostly recovered as one community",
               best_overlap >= 25, f"best overlap: {best_overlap}/30")
 
+    # Downstream of community detection at the same scale: the meta graph
+    # (vectorized map + groupby over ~200,000 pair rows) and the Gephi GEXF
+    # export (pure-Python XML over 40,000 nodes / ~200,000 edges) must both
+    # stay tractable -- these run inside the same --all-tags invocation.
+    clusters_df = analysis.assign_cluster_ids(communities)
+    fandom_summary = analysis.pd.DataFrame({
+        "cluster_id": sorted(clusters_df["cluster_id"].unique()),
+        "n_tags": clusters_df.groupby("cluster_id")["tag_id"].nunique().values,
+        "n_works": 10,
+        "top_fandoms": "Fandom (100%)",
+    })
+    start = time.time()
+    meta = analysis.build_cluster_meta_graph(pair_stats, clusters_df, fandom_summary)
+    elapsed = time.time() - start
+    check("large-scale meta-graph build completes in under 30s",
+          elapsed < 30, f"took {elapsed:.2f}s")
+    check("large-scale meta graph has one node per community",
+          meta.number_of_nodes() == clusters_df["cluster_id"].nunique(),
+          f"got {meta.number_of_nodes()} vs {clusters_df['cluster_id'].nunique()}")
+
+    import tempfile as _tempfile
+    with _tempfile.TemporaryDirectory() as gexf_dir:
+        gexf_path = os.path.join(gexf_dir, "large.gexf")
+        start = time.time()
+        analysis.write_gexf_export(graph, clusters_df, gexf_path)
+        elapsed = time.time() - start
+        check("large-scale (40,000-node) GEXF export completes in under 120s",
+              elapsed < 120, f"took {elapsed:.2f}s")
+        check("large-scale GEXF file is non-empty",
+              os.path.getsize(gexf_path) > 0)
+
 
 def run_large_scale_merge_checks():
     # Regression test for a real-world stall: merge_small_communities used
@@ -626,6 +697,99 @@ def run_large_scale_merge_checks():
           elapsed < 10, f"took {elapsed:.2f}s")
     check("fully-isolated communities all collapse into the one real community",
           len(merged_isolated) == 1, f"got {len(merged_isolated)} communities")
+
+
+def run_meta_graph_checks():
+    # Direct unit test of build_cluster_meta_graph against hand-built
+    # pair_stats/clusters_df/fandom_summary -- the CSV-fixture path above
+    # can't produce cross-cluster positive-PMI pairs (its two blocks never
+    # co-occur), so cross-cluster aggregation is exercised here. Three
+    # clusters: 1-2 share three positive-PMI pairs (and the pair rows are
+    # written in both (a from 1) and (a from 2) orientations, so the
+    # min/max canonicalization is what makes them aggregate together), 1-3
+    # share ONE negative-PMI pair (must NOT create an edge -- affinity
+    # edges only), and cluster 3 is otherwise isolated with no works.
+    pair_rows = [
+        # cluster 1 x cluster 2, positive pmi, both orientations
+        {"tag_a": "additional_tags::A1", "tag_b": "additional_tags::B1",
+         "joint_count": 4, "count_a": 8, "count_b": 8, "lift": 4.0, "pmi": 2.0},
+        {"tag_a": "additional_tags::B2", "tag_b": "additional_tags::A2",
+         "joint_count": 2, "count_a": 8, "count_b": 8, "lift": 2.0, "pmi": 1.0},
+        {"tag_a": "additional_tags::A1", "tag_b": "additional_tags::B2",
+         "joint_count": 3, "count_a": 8, "count_b": 8, "lift": 8.0, "pmi": 3.0},
+        # cluster 1 x cluster 3, NEGATIVE pmi -- excluded
+        {"tag_a": "additional_tags::A1", "tag_b": "additional_tags::C1",
+         "joint_count": 2, "count_a": 8, "count_b": 8, "lift": 0.5, "pmi": -1.0},
+        # within-cluster pair -- not a cross edge
+        {"tag_a": "additional_tags::A1", "tag_b": "additional_tags::A2",
+         "joint_count": 5, "count_a": 8, "count_b": 8, "lift": 4.0, "pmi": 2.0},
+    ]
+    pair_stats = analysis.pd.DataFrame(pair_rows)
+    clusters_df = analysis.pd.DataFrame([
+        {"tag_id": "additional_tags::A1", "field": "additional_tags", "label": "A1", "cluster_id": 1},
+        {"tag_id": "additional_tags::A2", "field": "additional_tags", "label": "A2", "cluster_id": 1},
+        {"tag_id": "additional_tags::B1", "field": "additional_tags", "label": "B1", "cluster_id": 2},
+        {"tag_id": "additional_tags::B2", "field": "additional_tags", "label": "B2", "cluster_id": 2},
+        {"tag_id": "additional_tags::C1", "field": "additional_tags", "label": "C1", "cluster_id": 3},
+    ])
+    fandom_summary = analysis.pd.DataFrame([
+        {"cluster_id": 1, "n_tags": 2, "n_works": 10, "top_fandoms": "Fandom X (80%), Fandom Y (20%)"},
+        {"cluster_id": 2, "n_tags": 2, "n_works": 8, "top_fandoms": "Fandom Z (100%)"},
+        {"cluster_id": 3, "n_tags": 1, "n_works": 0, "top_fandoms": ""},
+    ])
+
+    meta = analysis.build_cluster_meta_graph(pair_stats, clusters_df, fandom_summary)
+
+    check("meta graph has one node per cluster, namespaced cluster::{id}",
+          set(meta.nodes) == {"cluster::1", "cluster::2", "cluster::3"},
+          f"got {set(meta.nodes)}")
+    check("meta node label is '{id}: {top fandom name}' (name parsed from the summary string)",
+          meta.nodes["cluster::1"]["label"] == "1: Fandom X",
+          f"got {meta.nodes['cluster::1']['label']!r}")
+    check("a cluster with no fandom label gets the bare 'Cluster {id}' label",
+          meta.nodes["cluster::3"]["label"] == "Cluster 3",
+          f"got {meta.nodes['cluster::3']['label']!r}")
+    check("meta node title carries n_tags/n_works/top_fandoms",
+          "2 tags" in meta.nodes["cluster::1"]["title"]
+          and "10 works" in meta.nodes["cluster::1"]["title"]
+          and "Fandom X (80%)" in meta.nodes["cluster::1"]["title"],
+          f"got {meta.nodes['cluster::1']['title']!r}")
+
+    check("clusters 1-2 get exactly one edge aggregating both pair orientations",
+          meta.number_of_edges() == 1 and meta.has_edge("cluster::1", "cluster::2"),
+          f"got {list(meta.edges)}")
+    edge = meta.edges["cluster::1", "cluster::2"]
+    check("cross-cluster edge counts all three positive-PMI links",
+          edge["n_links"] == 3, f"got {edge}")
+    check("cross-cluster edge mean_pmi averages the crossing pairs' PMI",
+          abs(edge["mean_pmi"] - 2.0) < 1e-9, f"got {edge}")
+    check("a negative-PMI cross pair does NOT create an edge (affinity edges only)",
+          not meta.has_edge("cluster::1", "cluster::3"), f"got {list(meta.edges)}")
+
+    # Width cap: a synthetic 100,000-link edge must stay at width 10, not
+    # draw a 100,000px line.
+    big_pair_stats = analysis.pd.DataFrame([
+        {"tag_a": f"additional_tags::A{i}", "tag_b": f"additional_tags::B{i}",
+         "joint_count": 2, "count_a": 4, "count_b": 4, "lift": 2.0, "pmi": 1.0}
+        for i in range(100)
+    ])
+    big_clusters = analysis.pd.DataFrame(
+        [{"tag_id": f"additional_tags::A{i}", "field": "additional_tags",
+          "label": f"A{i}", "cluster_id": 1} for i in range(100)]
+        + [{"tag_id": f"additional_tags::B{i}", "field": "additional_tags",
+            "label": f"B{i}", "cluster_id": 2} for i in range(100)])
+    big_summary = analysis.pd.DataFrame([
+        {"cluster_id": 1, "n_tags": 100, "n_works": 50, "top_fandoms": "F (100%)"},
+        {"cluster_id": 2, "n_tags": 100, "n_works": 50, "top_fandoms": "G (100%)"},
+    ])
+    big_meta = analysis.build_cluster_meta_graph(big_pair_stats, big_clusters, big_summary)
+    big_edge = big_meta.edges["cluster::1", "cluster::2"]
+    check("edge visual width is log-scaled and capped (100 links -> ~5.6px, not 100px)",
+          big_edge["n_links"] == 100 and big_edge["width"] <= 10,
+          f"got {big_edge}")
+    check("meta node size is capped so a giant cluster can't swamp the canvas",
+          all(data["size"] <= 60 for _, data in big_meta.nodes(data=True)),
+          f"got {[data['size'] for _, data in big_meta.nodes(data=True)]}")
 
 
 def run_cluster_layout_checks():
@@ -758,6 +922,7 @@ def main():
     run_min_cluster_size_checks()
     run_large_scale_community_checks()
     run_large_scale_merge_checks()
+    run_meta_graph_checks()
     run_cluster_layout_checks()
     run_large_scale_cluster_layout_checks()
 

@@ -310,6 +310,63 @@ def assign_cluster_ids(communities):
     return result.sort_values(["cluster_id", "tag_id"]).reset_index(drop=True)
 
 
+def compute_cluster_fandom_summary(df, clusters_df, top_n):
+    """Per-cluster fandom summary (lives here rather than in
+    ao3_tag_fandom_labels.py -- which re-exports it -- because the cluster
+    meta-network below needs the same labels, and that module imports this
+    one, so the import can't go the other way): for each cluster_id, pools
+    every work containing ANY of the cluster's tags -- counted once per
+    cluster no matter how many of its tags the work matches -- and ranks
+    the fandoms of those works by percent of works (tie-break:
+    alphabetically smallest fandom name). Same denominator semantics as
+    ao3_tag_fandom_labels.py's per-tag labels: the percentage base is the
+    cluster's full work pool, so fandom-less works keep sums under 100 and
+    multi-fandom crossover works can push sums above 100, while every
+    individual value stays <= 100. Returns a DataFrame
+    [cluster_id, n_tags, n_works, top_fandoms] with one row per cluster
+    in clusters_df -- a cluster whose tags never appear in df keeps its
+    row with n_works=0 and an empty label rather than vanishing."""
+    cluster_by_tag = clusters_df.drop_duplicates("tag_id").set_index("tag_id")["cluster_id"]
+
+    tag_table = viz.build_document_tag_table(df, fields=ALL_METADATA_FIELDS)
+    tag_table = tag_table[tag_table["tag_id"].isin(cluster_by_tag.index)]
+    cluster_works = tag_table.assign(cluster_id=tag_table["tag_id"].map(cluster_by_tag))
+    # A work with several of the cluster's tags is still one story.
+    cluster_works = cluster_works[["cluster_id", "work_id"]].drop_duplicates()
+    cluster_totals = cluster_works.groupby("cluster_id").size()
+
+    # Deduped for the same reason as compute_fandom_labels: the scraper
+    # emits one row per (seed tag, work).
+    deduped = df.drop_duplicates(subset="work_id", keep="first")
+    fandom_table = viz.explode_field(deduped, "fandom")[["work_id", "fandom"]]
+
+    merged = cluster_works.merge(fandom_table, on="work_id")
+    counts = merged.groupby(["cluster_id", "fandom"]).size().reset_index(name="count")
+    counts["pct"] = counts["count"] / counts["cluster_id"].map(cluster_totals) * 100
+
+    counts = counts.sort_values(["cluster_id", "count", "fandom"], ascending=[True, False, True])
+    top = counts.groupby("cluster_id", sort=False).head(top_n)
+    top = top.assign(entry=top["fandom"] + " (" + top["pct"].round(0).astype(int).astype(str) + "%)")
+    labels = top.groupby("cluster_id", sort=False)["entry"].apply(", ".join)
+
+    n_tags = clusters_df.groupby("cluster_id")["tag_id"].nunique()
+    summary = pd.DataFrame({
+        "cluster_id": n_tags.index,
+        "n_tags": n_tags.values,
+        "n_works": n_tags.index.map(cluster_totals).fillna(0).astype(int),
+        "top_fandoms": n_tags.index.map(labels).fillna(""),
+    })
+    # ao3_tag_clusters.csv's cluster_ids are integers, but they arrive as
+    # strings when the CSV is read with dtype=str -- order numerically when
+    # every id parses as a number, so 2 sorts before 10.
+    numeric_order = pd.to_numeric(summary["cluster_id"], errors="coerce")
+    if numeric_order.notna().all():
+        summary = summary.iloc[numeric_order.argsort(kind="stable").to_numpy()]
+    else:
+        summary = summary.sort_values("cluster_id")
+    return summary.reset_index(drop=True)
+
+
 def color_graph_by_cluster(graph, clusters_df):
     """Mutates graph in place: recolors/regroups every node by its final
     cluster_id (instead of by field) and enriches its hover title, then
@@ -403,6 +460,94 @@ def compute_cluster_layout(graph, clusters_df, node_spacing=40):
         for tag_id, (x, y) in local_pos.items():
             positions[tag_id] = (x * node_spacing + center_x, y * node_spacing + center_y)
     return positions
+
+
+def build_cluster_meta_graph(pair_stats, clusters_df, fandom_summary):
+    """One node per cluster instead of one per tag -- the readable summary
+    view of the same data. The full tag-level network is faithful but
+    cognitively unreadable at --all-tags scale (tens of thousands of
+    nodes); dozens-to-hundreds of cluster nodes, each labeled with its top
+    fandom from fandom_summary (compute_cluster_fandom_summary's output),
+    answer "what is this data about" at a glance.
+
+    Nodes: id "cluster::{id}" (the "::" namespace keeps
+    _inject_cluster_filter_controls reusable verbatim -- its tag picker
+    shows the fandom label with "(cluster)" as the field); label
+    "{id}: {top fandom}" (bare "Cluster {id}" when the cluster has no
+    fandom label); size scaled by sqrt(n_tags), capped so a giant cluster
+    can't swamp the canvas; color/group by cluster_id, same palette as the
+    tag-level network.
+
+    Edges: one per cluster pair connected by at least one positive-PMI
+    tag pair (same affinity-edges-only rationale as build_cluster_graph),
+    aggregated vectorized -- n_links (how many tag pairs cross), mean_pmi
+    (their average affinity). Visual width is log-scaled and capped:
+    thousands of crossing links must not draw a thousand-pixel line
+    (_fast_populate_network only derives width from weight when width is
+    absent, so setting width explicitly takes precedence)."""
+    summary_by_id = fandom_summary.set_index("cluster_id")
+
+    graph = viz.nx.Graph()
+    for cluster_id, row in summary_by_id.iterrows():
+        top_fandom = row["top_fandoms"].split(" (")[0] if row["top_fandoms"] else ""
+        label = f"{cluster_id}: {top_fandom}" if top_fandom else f"Cluster {cluster_id}"
+        graph.add_node(
+            f"cluster::{cluster_id}", label=label, group=str(cluster_id),
+            color=_CLUSTER_PALETTE[(int(cluster_id) - 1) % len(_CLUSTER_PALETTE)],
+            size=int(min(60, 10 + 2 * math.sqrt(row["n_tags"]))),
+            title=(f"Cluster {cluster_id} — {row['n_tags']} tags, "
+                   f"{row['n_works']} works — {row['top_fandoms'] or 'no fandom co-occurrence'}"),
+        )
+
+    cluster_by_tag = clusters_df.drop_duplicates("tag_id").set_index("tag_id")["cluster_id"]
+    positive = pair_stats[pair_stats["pmi"] > 0]
+    cluster_a = positive["tag_a"].map(cluster_by_tag)
+    cluster_b = positive["tag_b"].map(cluster_by_tag)
+    crossing = positive.assign(cluster_a=cluster_a, cluster_b=cluster_b)
+    crossing = crossing[crossing["cluster_a"].notna() & crossing["cluster_b"].notna()
+                         & (crossing["cluster_a"] != crossing["cluster_b"])]
+    # Canonicalize so (3, 7) and (7, 3) aggregate together -- cluster ids
+    # are ints from assign_cluster_ids, so min/max is well-defined.
+    lo = crossing[["cluster_a", "cluster_b"]].min(axis=1)
+    hi = crossing[["cluster_a", "cluster_b"]].max(axis=1)
+    crossing = crossing.assign(cluster_lo=lo, cluster_hi=hi)
+    grouped = crossing.groupby(["cluster_lo", "cluster_hi"]).agg(
+        n_links=("pmi", "size"), mean_pmi=("pmi", "mean"))
+
+    for (cluster_lo, cluster_hi), row in grouped.iterrows():
+        graph.add_edge(
+            f"cluster::{cluster_lo}", f"cluster::{cluster_hi}",
+            n_links=int(row["n_links"]), mean_pmi=float(row["mean_pmi"]),
+            width=min(10.0, 1 + math.log1p(row["n_links"])),
+            title=(f"Cluster {cluster_lo} × Cluster {cluster_hi}: "
+                   f"{int(row['n_links'])} positive-PMI tag pairs, "
+                   f"mean pmi={row['mean_pmi']:.2f}"),
+        )
+    return graph
+
+
+def write_gexf_export(graph, clusters_df, out_path):
+    """Writes the full tag-level cluster graph as GEXF for Gephi -- the
+    right tool for actually exploring a graph this size (real multithreaded
+    ForceAtlas2 layout, interactive degree/weight filters, label
+    management). Exports a cleaned copy: label/field/cluster_id per node
+    and pmi/lift/joint_count (weight=pmi) per edge, dropping the
+    pyvis-specific color/title/x/y attributes -- Gephi's own workflow
+    (Appearance -> Partition by cluster_id) handles coloring, so exporting
+    render hints would just be noise."""
+    cluster_by_tag = clusters_df.drop_duplicates("tag_id").set_index("tag_id")["cluster_id"]
+
+    export = viz.nx.Graph()
+    for tag_id in graph.nodes():
+        field, _, label = tag_id.partition("::")
+        export.add_node(tag_id, label=label, field=field,
+                         cluster_id=int(cluster_by_tag.get(tag_id, 0)))
+    for tag_a, tag_b, data in graph.edges(data=True):
+        export.add_edge(tag_a, tag_b, weight=float(data["pmi"]),
+                         lift=float(data["lift"]), joint_count=int(data["joint_count"]))
+    viz.nx.write_gexf(export, out_path)
+    print(f"  wrote {out_path} ({export.number_of_nodes()} nodes, "
+          f"{export.number_of_edges()} edges)")
 
 
 def _all_cluster_tags(graph):
@@ -502,6 +647,17 @@ def build_arg_parser():
     parser.add_argument("--cluster-network-out", default="ao3_tag_cluster_network.html",
                          help="Cluster network HTML output "
                               "(default: ao3_tag_cluster_network.html)")
+    parser.add_argument("--cluster-meta-network-out",
+                         default="ao3_tag_cluster_meta_network.html",
+                         help="Cluster meta-network HTML output -- one node per "
+                              "cluster, labeled with its top fandom "
+                              "(default: ao3_tag_cluster_meta_network.html)")
+    parser.add_argument("--gexf-out", default=None,
+                         help="Also write the full tag-level cluster graph as GEXF "
+                              "for Gephi (label/field/cluster_id per node, "
+                              "pmi/lift/joint_count per edge). Off by default -- "
+                              "the XML is large and slow to write at --all-tags "
+                              "scale (default: not written)")
     parser.add_argument("--clusters-out", default="ao3_tag_clusters.csv",
                          help="Cluster-membership CSV output (default: ao3_tag_clusters.csv)")
 
@@ -553,6 +709,14 @@ def main(argv=None):
                 cluster_graph.nodes[tag_id]["y"] = y
             viz.render_network(cluster_graph, args.cluster_network_out,
                                 inject_filters=_inject_cluster_filter_controls, physics=False)
+
+            fandom_summary = compute_cluster_fandom_summary(df, clusters_df, top_n=3)
+            meta_graph = build_cluster_meta_graph(pair_stats, clusters_df, fandom_summary)
+            viz.render_network(meta_graph, args.cluster_meta_network_out,
+                                inject_filters=_inject_cluster_filter_controls)
+
+            if args.gexf_out:
+                write_gexf_export(cluster_graph, clusters_df, args.gexf_out)
 
 
 if __name__ == "__main__":

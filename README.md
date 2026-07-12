@@ -323,9 +323,23 @@ client-side physics — at `--all-tags` scale (tens of thousands of nodes) a
 live force simulation is what makes a browser tab hang, independent of file
 size
 
+**`ao3_tag_cluster_meta_network.html`** — the readable summary view of the same
+data: one node per **cluster** (dozens instead of tens of thousands), sized by
+tag count and labeled with the cluster's top co-occurring fandom (e.g.
+`7: Harry Potter`), with an edge wherever positive-PMI tag pairs cross two
+clusters (width scales with how many). Hover a node for the cluster's tag/work
+counts and full top-fandom breakdown; hover an edge for the link count and mean
+PMI
+
 **`ao3_tag_clusters.csv`** — discrete cluster membership (`tag_id`, `field`,
 `label`, `cluster_id`), built from the same community-detection result the network
 graph is colored by, so the two outputs are always consistent with each other
+
+**`<name>.gexf`** *(opt-in, via `--gexf-out`)* — the full tag-level graph in GEXF
+format for [Gephi](https://gephi.org/), which is built for exploring graphs this
+size: File → Open the `.gexf`, then Appearance → Partition by `cluster_id` to
+color by cluster, and Layout → ForceAtlas2. Nodes carry `label`/`field`/
+`cluster_id`; edges carry `weight` (=PMI), `lift`, and `joint_count`
 
 ### Usage
 
@@ -334,7 +348,8 @@ python ao3_tag_analysis.py
 ```
 
 Reads `ao3_tag_metadata.csv` and writes `ao3_additional_tags_frequency.csv`,
-`ao3_tag_cluster_network.html`, and `ao3_tag_clusters.csv`.
+`ao3_tag_cluster_network.html`, `ao3_tag_cluster_meta_network.html`, and
+`ao3_tag_clusters.csv`.
 
 ```bash
 # Only the frequency ranking, or only the clustering
@@ -395,6 +410,13 @@ meaningless but enormous lift).
                               (default: 1, no minimum)
 --cluster-network-out FILE   Cluster network HTML output
                               (default: ao3_tag_cluster_network.html)
+--cluster-meta-network-out FILE   Cluster meta-network HTML output -- one node
+                              per cluster, labeled with its top fandom
+                              (default: ao3_tag_cluster_meta_network.html)
+--gexf-out FILE              Also write the full tag-level cluster graph as GEXF
+                              for Gephi. Off by default -- the XML is large and
+                              slow to write at --all-tags scale (default: not
+                              written)
 --clusters-out FILE          Cluster-membership CSV output (default: ao3_tag_clusters.csv)
 --frequency-only             Only compute the frequency ranking, skip clustering
 --clusters-only              Only compute clustering, skip the frequency ranking
