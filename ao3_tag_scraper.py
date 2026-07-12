@@ -18,7 +18,7 @@ import csv
 import re
 import sys
 import time
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -127,6 +127,64 @@ def tag_works_url(href):
     return f"{BASE_URL}{path}"
 
 
+# AO3 escapes these characters inside a tag-name URL segment (on top of
+# ordinary percent-encoding) -- e.g. the relationship tag "Bob/Carol" lives
+# at /tags/Bob*s*Carol/works, not /tags/Bob%2FCarol/works.
+TAG_URL_SUBSTITUTIONS = [("/", "*s*"), ("&", "*a*"), (".", "*d*"),
+                          ("?", "*q*"), ("#", "*h*")]
+
+
+def tag_name_to_works_url(name):
+    """Builds a tag's works-listing URL from its display name, applying
+    AO3's tag-name escaping."""
+    escaped = name
+    for char, substitution in TAG_URL_SUBSTITUTIONS:
+        escaped = escaped.replace(char, substitution)
+    # safe="*": quote() would otherwise percent-escape the substitutions'
+    # own star characters, which AO3 expects literally.
+    return f"{BASE_URL}/tags/{quote(escaped, safe='*')}/works"
+
+
+def tag_name_from_url(url):
+    """Recovers a tag's display name from its works-listing (or tag
+    landing-page) URL, reversing percent-encoding and AO3's tag-name
+    escaping. The segment is isolated BEFORE unquoting so a stray
+    percent-encoded slash can't shift the path split."""
+    match = re.search(r"/tags/([^/?#]+)", urlparse(url).path)
+    if not match:
+        raise ValueError(f"not an AO3 tag URL (no /tags/<name> segment): {url}")
+    name = unquote(match.group(1))
+    for char, substitution in TAG_URL_SUBSTITUTIONS:
+        name = name.replace(substitution, char)
+    return name
+
+
+def resolve_start_tags(tag_names, tag_urls):
+    """Builds the step-1 [(tag_name, works_url), ...] list directly from
+    --tag names and/or --tag-url URLs, bypassing the /tags cloud scrape.
+    Deduped by tag name (first occurrence wins), order preserved."""
+    tags = []
+    seen = set()
+    for name in tag_names or []:
+        if name not in seen:
+            seen.add(name)
+            tags.append((name, tag_name_to_works_url(name)))
+    for url in tag_urls or []:
+        name = tag_name_from_url(url)
+        if name not in seen:
+            seen.add(name)
+            tags.append((name, tag_works_url(url)))
+    return tags
+
+
+def write_tags_csv(rows, tags_out):
+    """Writes the step-1 CSV. rows: (tag_name, tag_href, tag_url) triples."""
+    with open(tags_out, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["tag_name", "tag_href", "tag_url"])
+        writer.writerows(rows)
+
+
 def scrape_tag_list(session, tags_out):
     print(f"Step 1: fetching tag list from {TAGS_URL}")
     resp = fetch(session, TAGS_URL)
@@ -143,17 +201,11 @@ def scrape_tag_list(session, tags_out):
         print(f"  wrote the raw response to {debug_file} for comparison against "
               f"a browser's View Source", file=sys.stderr)
 
-    with open(tags_out, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["tag_name", "tag_href", "tag_url"])
-        rows = []
-        for name, href in tags:
-            url = tag_works_url(href)
-            writer.writerow([name, href, url])
-            rows.append((name, url))
+    rows = [(name, href, tag_works_url(href)) for name, href in tags]
+    write_tags_csv(rows, tags_out)
 
     print(f"  found {len(rows)} tags -> {tags_out}")
-    return rows
+    return [(name, url) for name, _, url in rows]
 
 
 def load_tags(tags_file):
@@ -375,6 +427,15 @@ def build_arg_parser():
                          help="Step 3 metadata output CSV (default: ao3_tag_metadata.csv)")
     parser.add_argument("--errors-out", default=None,
                          help="Step 3 errors CSV (default: errors_<--out>)")
+    parser.add_argument("--tag", action="append", metavar="NAME",
+                         help="Start from this tag instead of scraping the /tags "
+                              "cloud (repeatable). The works URL is built with "
+                              "AO3's tag-name escaping (e.g. Bob/Carol -> "
+                              "/tags/Bob*s*Carol/works)")
+    parser.add_argument("--tag-url", action="append", metavar="URL",
+                         help="Start from this tag works-page (or tag landing-page) "
+                              "URL instead of scraping the /tags cloud (repeatable). "
+                              "The tag name is recovered by reversing AO3's escaping")
     parser.add_argument("--tags-only", action="store_true",
                          help="Run Step 1 only, then stop")
     parser.add_argument("--step2", metavar="TAGS_FILE",
@@ -393,6 +454,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
     errors_out = args.errors_out or f"errors_{args.out}"
 
+    if (args.tag or args.tag_url) and (args.step2 or args.step3):
+        parser.error("--tag/--tag-url replace Step 1 and can't be combined with "
+                     "--step2/--step3 (which would silently ignore them)")
+
     session = make_session(args.header)
 
     if args.step3:
@@ -402,6 +467,14 @@ def main(argv=None):
 
     if args.step2:
         tags = load_tags(args.step2)
+    elif args.tag or args.tag_url:
+        tags = resolve_start_tags(args.tag, args.tag_url)
+        write_tags_csv([(name, urlparse(url).path, url) for name, url in tags],
+                        args.tags_out)
+        print(f"Step 1 skipped: starting from {len(tags)} provided tag(s) "
+              f"-> {args.tags_out}")
+        if args.tags_only:
+            return
     else:
         tags = scrape_tag_list(session, args.tags_out)
         if args.tags_only:

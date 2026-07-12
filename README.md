@@ -14,7 +14,7 @@ resumable steps, rate-limited requests, and retry with exponential backoff.
 
 | Feature | Detail |
 |---|---|
-| **Tag discovery** | Scrapes the tag cloud at `archiveofourown.org/tags` itself — no need to hand-supply a URL |
+| **Tag discovery** | Scrapes the tag cloud at `archiveofourown.org/tags` itself — no need to hand-supply a URL. Or start from specific tags instead, via `--tag`/`--tag-url` |
 | **Metadata only** | Never downloads fic body text |
 | **Three explicit steps** | Collect tags → collect work IDs per tag → collect metadata. Each step writes a plain CSV you can inspect before the next step runs |
 | **Resumable** | Steps can be run independently from saved CSVs; `--resume` skips works already scraped |
@@ -91,6 +91,24 @@ python ao3_tag_scraper.py --step2 ao3_tags.csv
 python ao3_tag_scraper.py --step3 ao3_tag_work_ids.csv --out ao3_tag_metadata.csv
 ```
 
+### Start from specific tags instead of the tag cloud
+
+Skip Step 1's `/tags` scrape entirely and seed the pipeline with chosen tags,
+by name and/or by works-page URL (both flags are repeatable and can be mixed):
+
+```bash
+python ao3_tag_scraper.py \
+  --tag-url "https://archiveofourown.org/tags/Choose%20Not%20To%20Use%20Archive%20Warnings/works"
+
+python ao3_tag_scraper.py --tag "Creator Chose Not To Use Archive Warnings" --tag "Angst"
+```
+
+Names are converted to URLs with AO3's tag-name escaping (and vice versa), so
+relationship-style names work: `--tag "Bob/Carol"` targets
+`/tags/Bob*s*Carol/works`. A tag *landing-page* URL (without `/works`) is also
+accepted. The same `ao3_tags.csv` is written either way, so `--step2`/reruns
+behave identically to a cloud-scraped run.
+
 ### Resume an interrupted Step 3
 
 ```bash
@@ -112,6 +130,11 @@ python ao3_tag_scraper.py \
 
 ```
 --limit-per-tag N   Most recent works to collect per tag (default: 100)
+--tag NAME           Start from this tag instead of the /tags cloud (repeatable;
+                      AO3's tag-name escaping is applied, e.g. Bob/Carol ->
+                      /tags/Bob*s*Carol/works)
+--tag-url URL         Start from this tag works-page or landing-page URL
+                       (repeatable; the tag name is recovered from the URL)
 --tags-out FILE      Step 1 output (default: ao3_tags.csv)
 --ids-out FILE        Step 2 output (default: ao3_tag_work_ids.csv)
 --out FILE             Step 3 metadata output (default: ao3_tag_metadata.csv)
@@ -167,7 +190,9 @@ Back-off schedule: 15s → 30s → 60s → 120s → 240s, then give up after 5 a
 
 `ao3_tag_scraper.ipynb` is a Jupyter notebook version of the same pipeline. Open it in
 VS Code, JupyterLab, or Classic Jupyter. Edit the Configuration cell to set
-`LIMIT_PER_TAG`, output filenames, and `RESUME`, then run all cells in order.
+`LIMIT_PER_TAG`, output filenames, and `RESUME` (and optionally `START_TAGS`, a list
+of tag names and/or works-page URLs that bypasses Step 1's tag-cloud scrape), then
+run all cells in order.
 
 > **Kernel restart required after updating:** if you've previously run an older
 > version of the notebook in the same session, do **Kernel → Restart Kernel and Run
