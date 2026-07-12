@@ -199,7 +199,9 @@ written in three formats: the PNG image, the exact matrix as CSV (for
 sorting/filtering in Excel, Sheets, or pandas — the PNG becomes unscannable
 once there are hundreds of seed-tag rows), and a self-contained sortable HTML
 table with the same color scale, sticky row/column headers, click-to-sort on
-any column, and a live search box for seed tags
+any column, and a live search box for seed tags. Note: a same-name cell (seed
+tag `Angst` × displayed tag `Angst`) below 100% is not a bug — see
+[Tag Wrangling](#tag-wrangling)
 
 **`ao3_tag_pair_network.html`** / **`heatmaps/heatmap_tag_pairs.png` / `.csv` /
 `.html`** — only written with `--tag-pairs`: tag-to-tag network graph and
@@ -502,6 +504,67 @@ printed summarizing how many tags were affected.
 `ao3_tag_fandom_labels.ipynb` is a Jupyter notebook version of the same tool,
 structured like `ao3_tag_analysis.ipynb` — edit the Configuration cell, then
 run all cells in order. The labeled table renders inline in addition to being
+saved to disk.
+
+## Tag Wrangling
+
+Browsing an AO3 canonical tag page (the scraper's seed tags) returns works
+tagged with the canonical tag **or any synonym/subtag wranglers merged into
+it** — but the scraped metadata records each work's tags as the author typed
+them. That's why a heatmap's same-name cell (seed tag `Angst` × displayed tag
+`Angst`) can read 47.5% rather than 100%: it measures how often authors
+literally typed the canonical tag. Zeroing it would falsely claim no works
+under `Angst` are tagged `Angst`; forcing it to 100 would fabricate a number
+the scraped data contradicts.
+
+`ao3_tag_wrangling.py` makes the measurement explicit. It has **no network
+dependency** — it only reads local CSVs.
+
+### Output files
+
+**`ao3_seed_tag_literal_usage.csv`** — one row per seed tag: `n_works`,
+`literal_works` (works displaying the seed tag itself, case-insensitively, in
+*any* metadata field — a seed tag can be a fandom/relationship/character, and
+AO3 tags are case-insensitively unique so a case variant is the same tag),
+`literal_pct`, and `wrangled_pct`. The two percentages always sum to 100 — a
+strict two-way partition of each seed tag's works.
+
+**`ao3_seed_tag_synonym_breakdown.csv`** *(only when `--synonyms-csv` exists)*
+— names the exact form each work used: `seed_tag, matched_via, n_works, pct`
+where `matched_via` is `literal`, the exact synonym/subtag name, or
+`unidentified` (a wrangling relation the CSV doesn't cover). A non-literal
+work counts under every known relation it displays, so a seed tag's
+percentages can sum past 100 (same semantics as the fandom-label outputs).
+
+The relations CSV format is `seed_tag, relation, related_tag` with `relation`
+in `synonym`/`subtag` (other values are ignored). It can be built by hand
+today; a scraper step that collects AO3's own synonym lists (one request per
+tag landing page) is a possible future addition.
+
+### Usage
+
+```bash
+python ao3_tag_wrangling.py
+```
+
+### All options
+
+```
+--input FILE          Metadata CSV to read (default: ao3_tag_metadata.csv)
+--synonyms-csv FILE   Wrangling relations CSV; the breakdown is skipped with a
+                       note if the file doesn't exist (default: ao3_tag_synonyms.csv)
+--literal-out FILE    Literal-vs-wrangled split CSV output
+                       (default: ao3_seed_tag_literal_usage.csv)
+--breakdown-out FILE  Per-synonym breakdown CSV output
+                       (default: ao3_seed_tag_synonym_breakdown.csv)
+-h, --help
+```
+
+### Notebook
+
+`ao3_tag_wrangling.ipynb` is a Jupyter notebook version of the same tool,
+structured like `ao3_tag_fandom_labels.ipynb` — edit the Configuration cell,
+then run all cells in order. Both tables render inline in addition to being
 saved to disk.
 
 ## AO3 terms of service
