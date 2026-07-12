@@ -334,6 +334,16 @@ def run_tag_pair_checks(tmpdir, script_path):
     tag_pair_heatmap_path = os.path.join(with_flag_heatmap_dir, "heatmap_tag_pairs.png")
     check("main() with --tag-pairs produces the tag-pair heatmap",
           os.path.exists(tag_pair_heatmap_path))
+    tag_pair_csv_path = os.path.join(with_flag_heatmap_dir, "heatmap_tag_pairs.csv")
+    check("main() with --tag-pairs produces the tag-pair heatmap CSV",
+          os.path.exists(tag_pair_csv_path))
+    check("main() with --tag-pairs produces the tag-pair heatmap HTML",
+          os.path.exists(os.path.join(with_flag_heatmap_dir, "heatmap_tag_pairs.html")))
+    # NaN cells ("never co-occurs", deliberately distinct from 0) survive
+    # the CSV round-trip as missing values, not zeros.
+    tag_pair_csv = viz.pd.read_csv(tag_pair_csv_path, index_col=0)
+    check("tag-pair heatmap CSV keeps never-co-occurring cells as NaN, not 0",
+          tag_pair_csv.isna().any().any(), "expected at least one NaN cell")
     with open(with_flag_tag_pair_network, encoding="utf-8") as f:
         tag_pair_html = f.read()
     # fandom::Beta survives default filtering (it pairs with character::Bob:
@@ -452,6 +462,54 @@ def run_large_scale_sparsity_checks():
     check("planted pair is canonicalized alphabetically (KnownA < KnownB)",
           not known_pair.empty and known_pair.iloc[0]["tag_a"] == "additional_tags::KnownA",
           f"got {known_pair.to_dict('records')}")
+
+
+def run_heatmap_export_checks(tmpdir):
+    # Direct unit tests of write_heatmap_csv / render_heatmap_html against
+    # hand-built matrices: HTML-escaping of arbitrary AO3 text (row labels
+    # and column values are user data) and NaN masking (the tag-pair
+    # matrix's "never co-occurs" cells must stay blank, with an empty sort
+    # key, not render as 0).
+    export_dir = os.path.join(tmpdir, "heatmap_exports")
+    os.makedirs(export_dir, exist_ok=True)
+
+    nasty = viz.pd.DataFrame(
+        {'<img src=x>': [80.0, 12.5], 'Angst & "Feels"': [20.0, 62.5]},
+        index=['<b>evil</b>&tag', 'Normal Tag'])
+    nasty.index.name = "tag"
+    nasty_html_path = os.path.join(export_dir, "nasty.html")
+    viz.render_heatmap_html(nasty, "additional_tags", nasty_html_path, normalized=True)
+    with open(nasty_html_path, encoding="utf-8") as f:
+        nasty_html = f.read()
+    check("heatmap HTML escapes malicious row labels",
+          "<b>evil</b>" not in nasty_html and "&lt;b&gt;evil&lt;/b&gt;&amp;tag" in nasty_html)
+    check("heatmap HTML escapes malicious column headers",
+          "<img" not in nasty_html and "&lt;img src=x&gt;" in nasty_html)
+
+    pmi = viz.pd.DataFrame({"A": [float("nan"), 1.5], "B": [-2.0, 0.5]},
+                            index=["TagA", "TagB"])
+    pmi_html_path = os.path.join(export_dir, "pmi.html")
+    viz.render_heatmap_html(pmi, "tag pair", pmi_html_path, cmap="coolwarm",
+                             center=0, fmt=".2f")
+    with open(pmi_html_path, encoding="utf-8") as f:
+        pmi_html = f.read()
+    check("NaN heatmap cell renders blank with an empty sort key (no background)",
+          '<td data-v=""></td>' in pmi_html)
+
+    csv_path = os.path.join(export_dir, "nasty.csv")
+    viz.write_heatmap_csv(nasty, csv_path)
+    reread = viz.pd.read_csv(csv_path, index_col=0)
+    check("heatmap CSV round-trips values exactly",
+          reread.loc["Normal Tag", 'Angst & "Feels"'] == 62.5,
+          f"got {reread.to_dict()}")
+
+    # Empty matrices are skipped with a note, same as render_heatmap.
+    empty = viz.pd.DataFrame(index=["OnlyTag"])
+    viz.write_heatmap_csv(empty, os.path.join(export_dir, "empty.csv"))
+    viz.render_heatmap_html(empty, "rating", os.path.join(export_dir, "empty.html"))
+    check("empty matrices produce no CSV/HTML files",
+          not os.path.exists(os.path.join(export_dir, "empty.csv"))
+          and not os.path.exists(os.path.join(export_dir, "empty.html")))
 
 
 def run_fast_populate_network_checks():
@@ -791,6 +849,37 @@ def main():
     for field in viz.FIELDS_TO_VISUALIZE:
         p = os.path.join(heatmap_out_dir, f"heatmap_{field}.png")
         check(f"main() produced heatmap for {field}", os.path.exists(p))
+        check(f"main() produced heatmap CSV for {field}",
+              os.path.exists(os.path.join(heatmap_out_dir, f"heatmap_{field}.csv")))
+        check(f"main() produced heatmap HTML for {field}",
+              os.path.exists(os.path.join(heatmap_out_dir, f"heatmap_{field}.html")))
+
+    # 7b. The heatmap CSV is the exact matrix main() rendered: re-read one
+    # and compare to a directly-computed cooccurrence_matrix.
+    rating_csv = viz.pd.read_csv(os.path.join(heatmap_out_dir, "heatmap_rating.csv"),
+                                  index_col=0)
+    expected_rating = viz.cooccurrence_matrix(
+        field_tables["rating"], "rating", seed_tags, normalize_by=work_counts)
+    check("heatmap CSV round-trips the exact rendered matrix",
+          rating_csv.shape == expected_rating.shape
+          and (rating_csv.to_numpy() - expected_rating.to_numpy()).__abs__().max() < 1e-9,
+          f"csv shape {rating_csv.shape} vs {expected_rating.shape}")
+
+    # 7c. The heatmap HTML is a sortable table: search box, sort script,
+    # one <td> per matrix cell, and every cell's numeric sort key is a
+    # plain float (a numpy repr like "np.float64(57.6)" here would make
+    # the JS comparator NaN and silently break sorting -- a real bug
+    # caught in browser verification).
+    with open(os.path.join(heatmap_out_dir, "heatmap_rating.html"), encoding="utf-8") as f:
+        rating_html = f.read()
+    check("heatmap HTML has the row search box", 'id="hm-search"' in rating_html)
+    check("heatmap HTML has the sort script", "sortRows" in rating_html)
+    check("heatmap HTML has one <td> per matrix cell",
+          rating_html.count("<td") == expected_rating.shape[0] * expected_rating.shape[1],
+          f"got {rating_html.count('<td')} vs "
+          f"{expected_rating.shape[0] * expected_rating.shape[1]}")
+    check("heatmap HTML sort keys are plain floats, not numpy reprs",
+          "np.float64" not in rating_html)
 
     # 8. --min-proportion CLI: mutual exclusivity and range validation.
     # Deliberately uses "--min-count 2" -- the same value as its own default --
@@ -849,6 +938,9 @@ def main():
     # 12. render_network performance/physics-toggle regressions.
     run_fast_populate_network_checks()
     run_render_network_physics_checks(tmpdir)
+
+    # 13. Heatmap CSV/HTML export unit checks (escaping, NaN masking).
+    run_heatmap_export_checks(tmpdir)
 
     print()
     if FAILURES:

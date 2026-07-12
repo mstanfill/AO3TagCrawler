@@ -193,11 +193,18 @@ each work's `rating`, `warnings`, `category`, `fandom`, and `additional_tags`. I
 
 **`ao3_tag_network.html`** — self-contained interactive network graph (pan/zoom/drag/hover)
 
-**`heatmaps/heatmap_<field>.png`** — one PNG per field in `rating`, `warnings`,
-`category`, `fandom`, `additional_tags`
+**`heatmaps/heatmap_<field>.png` / `.csv` / `.html`** — one set per field in
+`rating`, `warnings`, `category`, `fandom`, `additional_tags`. Each heatmap is
+written in three formats: the PNG image, the exact matrix as CSV (for
+sorting/filtering in Excel, Sheets, or pandas — the PNG becomes unscannable
+once there are hundreds of seed-tag rows), and a self-contained sortable HTML
+table with the same color scale, sticky row/column headers, click-to-sort on
+any column, and a live search box for seed tags
 
-**`ao3_tag_pair_network.html`** / **`heatmaps/heatmap_tag_pairs.png`** — only written
-with `--tag-pairs`: tag-to-tag network graph and heatmap of lift/PMI values
+**`ao3_tag_pair_network.html`** / **`heatmaps/heatmap_tag_pairs.png` / `.csv` /
+`.html`** — only written with `--tag-pairs`: tag-to-tag network graph and
+heatmap of lift/PMI values, the heatmap in the same three formats
+(never-co-occurring pairs stay blank in all three, distinct from a meaningful 0)
 
 ### Usage
 
@@ -206,7 +213,7 @@ python ao3_tag_visualizer.py
 ```
 
 Reads `ao3_tag_metadata.csv` and writes `ao3_tag_network.html` plus
-`heatmaps/heatmap_<field>.png` for each field.
+`heatmaps/heatmap_<field>.png` (and its `.csv`/`.html` companions) for each field.
 
 ```bash
 # Adjust top-N filtering and noise threshold
@@ -264,7 +271,8 @@ work) whose lift would otherwise look enormous but isn't statistically meaningfu
                           exclusive with --min-count
 --top-seed-tags N         Only include the N seed tags with the most works (default: all)
 --network-out FILE        Interactive network HTML output (default: ao3_tag_network.html)
---heatmap-out-dir DIR     Directory for heatmap PNGs (default: heatmaps)
+--heatmap-out-dir DIR     Directory for heatmap outputs (PNG + CSV + sortable
+                           HTML per heatmap) (default: heatmaps)
 --network-only            Only build the network, skip heatmaps
 --heatmaps-only           Only build heatmaps, skip the network
 --tag-pairs               Also compute/render tag-pair co-occurrence statistics

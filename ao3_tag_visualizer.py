@@ -15,6 +15,7 @@ visualization is built. No network access is required -- this only reads a
 local CSV.
 """
 import argparse
+import html
 import json
 import os
 import re
@@ -185,6 +186,168 @@ def render_heatmap(matrix, field, out_path, normalized=False, cmap="viridis",
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
+    print(f"  wrote {out_path} ({matrix.shape[0]}x{matrix.shape[1]})")
+
+
+def write_heatmap_csv(matrix, out_path):
+    """The heatmap's exact matrix as CSV, for sorting/filtering in
+    Excel/Sheets/pandas -- the PNG becomes unscannable once there are
+    hundreds of seed-tag rows. NaN cells (the tag-pair matrix's "never
+    co-occurs", deliberately distinct from 0) become empty CSV cells."""
+    if matrix.empty or matrix.shape[1] == 0:
+        print("  skipping heatmap CSV: no data after filtering", file=sys.stderr)
+        return
+    matrix.to_csv(out_path)
+    print(f"  wrote {out_path} ({matrix.shape[0]}x{matrix.shape[1]})")
+
+
+_HEATMAP_TABLE_CSS = """
+<style>
+body { font-family: sans-serif; font-size: 13px; margin: 0; }
+#hm-controls { position: sticky; top: 0; z-index: 3; background: #fafafa;
+  padding: 8px 12px; border-bottom: 1px solid #ccc; }
+#hm-search { width: 260px; padding: 4px 6px; margin-right: 14px; }
+#hm-legend-bar { display: inline-block; width: 160px; height: 12px;
+  vertical-align: middle; margin: 0 6px; border: 1px solid #aaa; }
+#hm-scroll { overflow: auto; max-height: calc(100vh - 46px); }
+table { border-collapse: collapse; }
+th, td { padding: 3px 7px; text-align: right; white-space: nowrap;
+  border: 1px solid #e0e0e0; }
+thead th { position: sticky; top: 0; z-index: 2; background: #f0f0f0;
+  cursor: pointer; }
+thead th:hover { background: #e0e8f0; }
+tbody th { position: sticky; left: 0; z-index: 1; background: #f0f0f0;
+  text-align: left; font-weight: normal; }
+thead th:first-child { left: 0; z-index: 4; }
+</style>
+"""
+
+_HEATMAP_SORT_SCRIPT = """
+<script>
+(function () {
+  const table = document.getElementById("hm-table");
+  const tbody = table.tBodies[0];
+  const headers = table.tHead.rows[0].cells;
+  let sortCol = null;
+  let ascending = false;
+
+  function sortRows(col) {
+    // Column 0 is the row-label column: sort alphabetically (ascending
+    // first). Data columns sort by the numeric data-v sort key
+    // (descending first); blank/NaN cells always sink to the bottom.
+    if (sortCol === col) { ascending = !ascending; }
+    else { sortCol = col; ascending = (col === 0); }
+    const rows = Array.from(tbody.rows);
+    rows.sort(function (a, b) {
+      if (col === 0) {
+        const av = a.cells[0].textContent.toLowerCase();
+        const bv = b.cells[0].textContent.toLowerCase();
+        return ascending ? av.localeCompare(bv) : bv.localeCompare(av);
+      }
+      const araw = a.cells[col].dataset.v;
+      const braw = b.cells[col].dataset.v;
+      if (araw === "" && braw === "") return 0;
+      if (araw === "") return 1;
+      if (braw === "") return -1;
+      return ascending ? (araw - braw) : (braw - araw);
+    });
+    rows.forEach(function (r) { tbody.appendChild(r); });
+  }
+
+  for (let i = 0; i < headers.length; i++) {
+    headers[i].addEventListener("click", function () { sortRows(i); });
+  }
+
+  document.getElementById("hm-search").addEventListener("input", function () {
+    const q = this.value.trim().toLowerCase();
+    for (const row of tbody.rows) {
+      row.hidden = q !== "" && row.cells[0].textContent.toLowerCase().indexOf(q) === -1;
+    }
+  });
+})();
+</script>
+"""
+
+
+def render_heatmap_html(matrix, field, out_path, normalized=False, cmap="viridis",
+                         center=None, xlabel=None, ylabel=None, cbar_label=None, fmt=None):
+    """The heatmap as a self-contained sortable/searchable HTML table --
+    same signature, colormap, value format, and NaN masking as
+    render_heatmap, but navigable where a huge PNG can only be scanned:
+    sticky row/column headers, click any column header to sort by it
+    (click again to flip; blanks always last; the corner header sorts
+    row labels alphabetically), and a live search box filtering rows.
+    Row labels and column values are arbitrary AO3 text, so everything
+    is HTML-escaped and the sort keys travel in data-v attributes rather
+    than being parsed back out of display text."""
+    if matrix.empty or matrix.shape[1] == 0:
+        print(f"  skipping heatmap HTML for {field}: no data after filtering",
+              file=sys.stderr)
+        return
+    if fmt is None:
+        fmt = ".1f" if normalized else "d"
+    if cbar_label is None:
+        cbar_label = "% of tag's works" if normalized else "co-occurrence count"
+
+    values = matrix.to_numpy(dtype=float)
+    finite = values[np.isfinite(values)]
+    vmin = float(finite.min()) if finite.size else 0.0
+    vmax = float(finite.max()) if finite.size else 1.0
+    if center is not None:
+        # Same symmetric range seaborn uses for center=: the colormap
+        # midpoint lands exactly on `center`.
+        spread = max(abs(vmin - center), abs(vmax - center)) or 1.0
+        vmin, vmax = center - spread, center + spread
+    if vmax == vmin:
+        vmax = vmin + 1.0
+    colormap = plt.get_cmap(cmap)
+
+    def cell_style(value):
+        r, g, b, _ = colormap((value - vmin) / (vmax - vmin))
+        # Perceived luminance decides black vs. white cell text.
+        luminance = 0.299 * r + 0.587 * g + 0.114 * b
+        text = "#000" if luminance > 0.5 else "#fff"
+        return (f"background-color:#{int(r * 255):02x}{int(g * 255):02x}"
+                f"{int(b * 255):02x};color:{text}")
+
+    corner = html.escape(ylabel if ylabel is not None else "seed tag")
+    header_cells = "".join(
+        f"<th>{html.escape(str(column))}</th>" for column in matrix.columns)
+    body_rows = []
+    for row_label, row in matrix.iterrows():
+        cells = [f"<th>{html.escape(str(row_label))}</th>"]
+        for value in row.to_numpy(dtype=float):
+            if not np.isfinite(value):
+                cells.append('<td data-v=""></td>')
+            else:
+                # float(value), not value directly: numpy scalars repr as
+                # "np.float64(57.6)", which the JS numeric comparator turns
+                # into NaN, silently breaking column sorting.
+                cells.append(f'<td data-v="{float(value)!r}" style="{cell_style(value)}">'
+                             f"{format(value, fmt) if fmt != 'd' else int(value)}</td>")
+        body_rows.append("<tr>" + "".join(cells) + "</tr>")
+
+    gradient_stops = ", ".join(
+        "#" + "".join(f"{int(channel * 255):02x}" for channel in colormap(i / 10)[:3])
+        for i in range(11))
+    document = (
+        "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">"
+        f"<title>heatmap: {html.escape(field)}</title>{_HEATMAP_TABLE_CSS}</head><body>\n"
+        '<div id="hm-controls">'
+        '<input type="text" id="hm-search" placeholder="Search rows…" autocomplete="off">'
+        f"<span>{html.escape(cbar_label)}:</span>"
+        f"<span>{format(vmin, fmt) if fmt != 'd' else int(vmin)}</span>"
+        f'<span id="hm-legend-bar" style="background:linear-gradient(to right, {gradient_stops});"></span>'
+        f"<span>{format(vmax, fmt) if fmt != 'd' else int(vmax)}</span>"
+        "<span style=\"margin-left:14px;color:#777;\">click a column header to sort</span>"
+        "</div>\n"
+        '<div id="hm-scroll"><table id="hm-table">'
+        f"<thead><tr><th>{corner}</th>{header_cells}</tr></thead>"
+        f"<tbody>{''.join(body_rows)}</tbody></table></div>\n"
+        f"{_HEATMAP_SORT_SCRIPT}</body></html>\n"
+    )
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(document)
     print(f"  wrote {out_path} ({matrix.shape[0]}x{matrix.shape[1]})")
 
 
@@ -1154,6 +1317,9 @@ def main(argv=None):
             matrix = cooccurrence_matrix(counts, field, seed_tags, normalize_by=work_counts)
             out_path = os.path.join(args.heatmap_out_dir, f"heatmap_{field}.png")
             render_heatmap(matrix, field, out_path, normalized=True)
+            base = os.path.splitext(out_path)[0]
+            write_heatmap_csv(matrix, base + ".csv")
+            render_heatmap_html(matrix, field, base + ".html", normalized=True)
 
     if args.tag_pairs:
         if args.min_pmi <= args.max_pmi:
@@ -1177,6 +1343,11 @@ def main(argv=None):
             os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
             render_heatmap(matrix, "tag pair", out_path, cmap="coolwarm", center=0,
                            xlabel="tag", ylabel="tag", cbar_label="PMI (log2 lift)", fmt=".2f")
+            base = os.path.splitext(out_path)[0]
+            write_heatmap_csv(matrix, base + ".csv")
+            render_heatmap_html(matrix, "tag pair", base + ".html", cmap="coolwarm",
+                                 center=0, xlabel="tag", ylabel="tag",
+                                 cbar_label="PMI (log2 lift)", fmt=".2f")
 
 
 if __name__ == "__main__":
