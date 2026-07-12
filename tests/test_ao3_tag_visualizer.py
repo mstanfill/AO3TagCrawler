@@ -874,6 +874,12 @@ def main():
         rating_html = f.read()
     check("heatmap HTML has the row search box", 'id="hm-search"' in rating_html)
     check("heatmap HTML has the sort script", "sortRows" in rating_html)
+    check("heatmap HTML has the column-sort (row-label click) script",
+          "sortColumns" in rating_html)
+    check("heatmap HTML hint mentions both sort directions",
+          "click a row label to sort columns" in rating_html)
+    check("heatmap HTML styles row labels as clickable",
+          "tbody th:hover" in rating_html)
     check("heatmap HTML has one <td> per matrix cell",
           rating_html.count("<td") == expected_rating.shape[0] * expected_rating.shape[1],
           f"got {rating_html.count('<td')} vs "
