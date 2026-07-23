@@ -597,6 +597,52 @@ structured like `ao3_tag_fandom_labels.ipynb` — edit the Configuration cell,
 then run all cells in order. Both tables render inline in addition to being
 saved to disk.
 
+## Tags per Story
+
+`ao3_tag_counts.py` reports descriptive statistics on how many distinct tags
+each work carries — both pooled across all seven tag-bearing fields (`rating`,
+`warnings`, `category`, `fandom`, `relationship`, `character`,
+`additional_tags`) and broken down per field. It has **no network dependency**
+— it only reads a local CSV.
+
+Three data-shape quirks are handled correctly: the scraper emits one row per
+`(seed tag, work)`, so a work found via several tags is deduped to one; a
+comma-separated cell (`"A, B, C"`) is deduped within the cell and counts each
+distinct value; and a tag is namespaced `field::value`, so the same literal
+string in two fields counts as two tags. **Zeros are included** — a story with
+no `additional_tags` counts as 0, so the per-field means describe every story,
+not just the ones that happen to use the field.
+
+### Output file
+
+**`ao3_tags_per_story_stats.csv`** — one row for the pooled `all_fields` total
+plus one per field, each with: `n_works` (distinct works — the denominator),
+`total_tags`, `mean`, `std`, `min`, `p25`, `median`, `p75`, `max`.
+
+### Usage
+
+```bash
+python ao3_tag_counts.py
+```
+
+Reads `ao3_tag_metadata.csv`, writes `ao3_tags_per_story_stats.csv`, and prints
+the table.
+
+### All options
+
+```
+--input FILE   Metadata CSV to read (default: ao3_tag_metadata.csv)
+--out FILE     Statistics CSV output (default: ao3_tags_per_story_stats.csv)
+-h, --help
+```
+
+### Notebook
+
+`ao3_tag_counts.ipynb` is a Jupyter notebook version of the same tool,
+structured like `ao3_tag_wrangling.ipynb` — edit the Configuration cell, then
+run all cells in order. The stats table renders inline in addition to being
+saved to disk.
+
 ## AO3 terms of service
 
 AO3 asks that scraping tools wait between requests to avoid overloading their
