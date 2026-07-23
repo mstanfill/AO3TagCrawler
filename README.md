@@ -492,14 +492,17 @@ python ao3_tag_fandom_labels.py
 Reads `ao3_tag_metadata.csv` and `ao3_tag_clusters.csv`, and writes:
 
 **`ao3_tag_clusters_with_fandoms.csv`** — every column from the input CSV, plus a
-new `top_fandoms` column, e.g. `Fandom A (75%), Fandom B (25%)`. The input
+new `top_fandoms` column (e.g. `Fandom A (75%), Fandom B (25%)`) and an
+`n_fandoms` column counting **all** distinct fandoms the tag co-occurs with — so
+you can see both the top few and how concentrated vs. spread the usage is (a
+character tag might span 2 fandoms, a cross-cutting trope 200). The input
 `--clusters-csv` is never modified in place.
 
 **`ao3_cluster_fandoms.csv`** — one row per cluster: `cluster_id`, `n_tags` (the
-cluster's distinct tags), `n_works` (distinct works containing any of them), and
-`top_fandoms` in the same `Fandom A (62%), …` format, percentages out of the
-cluster's whole work pool. Skipped with a note if the input CSV has no
-`cluster_id` column.
+cluster's distinct tags), `n_works` (distinct works containing any of them),
+`n_fandoms` (distinct fandoms those works span), and `top_fandoms` in the same
+`Fandom A (62%), …` format, percentages out of the cluster's whole work pool.
+Skipped with a note if the input CSV has no `cluster_id` column.
 
 ```bash
 # Label a different CSV, with a different N and column name
