@@ -23,20 +23,30 @@ import ao3_tag_analysis as analysis
 import ao3_tag_visualizer as viz
 
 
-def compute_fandom_labels(df, tag_ids, top_n):
-    """Returns a dict tag_id -> "Fandom A (62%), Fandom B (25%), ..."
-    string, ranked by descending co-occurrence percentage (tie-break:
-    alphabetically smallest fandom name), computed from real per-work
-    co-occurrence in df. The percentage denominator is the tag's total
-    document count (every work containing the tag), not just the subset
-    with a known fandom, so a tag whose usage is partly on fandom-less
-    works will show percentages that don't sum to 100 -- an honest
-    reflection of the data rather than silently renormalizing it away.
-    Crossover works with multiple fandoms can likewise push a tag's
-    percentages to sum above 100, for the same reason (fandom is a
-    multi-valued field, same as every other field this codebase pools).
+def compute_fandom_summary(df, tag_ids, top_n):
+    """Returns a DataFrame [tag_id, n_fandoms, top_fandoms], one row per
+    tag_id, computed from real per-work co-occurrence in df:
+
+      - top_fandoms: "Fandom A (62%), Fandom B (25%), ..." -- the top_n
+        co-occurring fandoms, ranked by descending co-occurrence percentage
+        (tie-break: alphabetically smallest fandom name). The percentage
+        denominator is the tag's total document count (every work
+        containing the tag), not just the subset with a known fandom, so a
+        tag whose usage is partly on fandom-less works will show
+        percentages that don't sum to 100 -- an honest reflection of the
+        data rather than silently renormalizing it away. Crossover works
+        with multiple fandoms can likewise push a tag's percentages to sum
+        above 100, for the same reason (fandom is a multi-valued field,
+        same as every other field this codebase pools).
+      - n_fandoms: how many DISTINCT fandoms co-occur with the tag at all
+        (every fandom that appears at least once, NOT truncated to top_n)
+        -- so you can see both the top few and how concentrated vs. spread
+        the tag's fandom usage is (a character tag might span 2 fandoms, a
+        cross-cutting trope like Angst 200).
+
     tag_ids absent from df's metadata entirely (a stale/mismatched
-    --clusters-csv) get an empty string rather than raising."""
+    --clusters-csv) get n_fandoms=0 and an empty top_fandoms rather than
+    raising."""
     tag_table = viz.build_document_tag_table(df, fields=analysis.ALL_METADATA_FIELDS)
     tag_table = tag_table[tag_table["tag_id"].isin(tag_ids)]
     tag_totals = tag_table.groupby("tag_id").size()
@@ -55,6 +65,8 @@ def compute_fandom_labels(df, tag_ids, top_n):
     counts = merged.groupby(["tag_id", "fandom"]).size().reset_index(name="count")
     counts["pct"] = counts["count"] / counts["tag_id"].map(tag_totals) * 100
 
+    n_fandoms = counts.groupby("tag_id")["fandom"].nunique()
+
     # Rank/truncate with vectorized pandas ops (sort_values + groupby().head()),
     # not a Python-level loop over every tag_id's group -- at real --all-tags
     # scale (tens of thousands of tags) a per-group loop calling
@@ -64,11 +76,23 @@ def compute_fandom_labels(df, tag_ids, top_n):
     counts = counts.sort_values(["tag_id", "count", "fandom"], ascending=[True, False, True])
     top = counts.groupby("tag_id", sort=False).head(top_n)
     top = top.assign(entry=top["fandom"] + " (" + top["pct"].round(0).astype(int).astype(str) + "%)")
-    labels = top.groupby("tag_id", sort=False)["entry"].apply(", ".join).to_dict()
+    labels = top.groupby("tag_id", sort=False)["entry"].apply(", ".join)
 
-    for tag_id in tag_ids:
-        labels.setdefault(tag_id, "")
-    return labels
+    ordered = list(tag_ids)
+    return pd.DataFrame({
+        "tag_id": ordered,
+        "n_fandoms": [int(n_fandoms.get(tag_id, 0)) for tag_id in ordered],
+        "top_fandoms": [labels.get(tag_id, "") for tag_id in ordered],
+    })
+
+
+def compute_fandom_labels(df, tag_ids, top_n):
+    """Thin wrapper over compute_fandom_summary preserving the original
+    dict[tag_id -> "Fandom A (62%), ..."] contract (empty string for a
+    tag_id absent from df). See compute_fandom_summary for the co-occurrence
+    semantics."""
+    summary = compute_fandom_summary(df, tag_ids, top_n)
+    return dict(zip(summary["tag_id"], summary["top_fandoms"]))
 
 
 # Moved into ao3_tag_analysis.py (whose cluster meta-network needs the same
@@ -114,7 +138,9 @@ def main():
         sys.exit(1)
 
     tag_ids = set(clusters_df["tag_id"])
-    labels = compute_fandom_labels(df, tag_ids, args.top_n)
+    summary = compute_fandom_summary(df, tag_ids, args.top_n)
+    labels = dict(zip(summary["tag_id"], summary["top_fandoms"]))
+    fandom_counts = dict(zip(summary["tag_id"], summary["n_fandoms"]))
 
     missing = sum(1 for tag_id in tag_ids if labels.get(tag_id) == "")
     if missing:
@@ -122,6 +148,7 @@ def main():
               f"fandom co-occurrence found in {args.input} (stale/mismatched input?)",
               file=sys.stderr)
 
+    clusters_df["n_fandoms"] = clusters_df["tag_id"].map(fandom_counts)
     clusters_df[args.column_name] = clusters_df["tag_id"].map(labels)
     clusters_df.to_csv(args.out, index=False)
     print(f"wrote {args.out} ({len(clusters_df)} rows labeled)")

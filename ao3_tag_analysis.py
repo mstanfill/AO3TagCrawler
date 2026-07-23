@@ -323,9 +323,12 @@ def compute_cluster_fandom_summary(df, clusters_df, top_n):
     cluster's full work pool, so fandom-less works keep sums under 100 and
     multi-fandom crossover works can push sums above 100, while every
     individual value stays <= 100. Returns a DataFrame
-    [cluster_id, n_tags, n_works, top_fandoms] with one row per cluster
-    in clusters_df -- a cluster whose tags never appear in df keeps its
-    row with n_works=0 and an empty label rather than vanishing."""
+    [cluster_id, n_tags, n_works, n_fandoms, top_fandoms] with one row per
+    cluster in clusters_df -- a cluster whose tags never appear in df keeps
+    its row with n_works=0, n_fandoms=0, and an empty label rather than
+    vanishing. n_fandoms is how many DISTINCT fandoms the cluster's works
+    span (every fandom that appears at least once, not truncated to
+    top_n)."""
     cluster_by_tag = clusters_df.drop_duplicates("tag_id").set_index("tag_id")["cluster_id"]
 
     tag_table = viz.build_document_tag_table(df, fields=ALL_METADATA_FIELDS)
@@ -344,6 +347,8 @@ def compute_cluster_fandom_summary(df, clusters_df, top_n):
     counts = merged.groupby(["cluster_id", "fandom"]).size().reset_index(name="count")
     counts["pct"] = counts["count"] / counts["cluster_id"].map(cluster_totals) * 100
 
+    cluster_fandoms = counts.groupby("cluster_id")["fandom"].nunique()
+
     counts = counts.sort_values(["cluster_id", "count", "fandom"], ascending=[True, False, True])
     top = counts.groupby("cluster_id", sort=False).head(top_n)
     top = top.assign(entry=top["fandom"] + " (" + top["pct"].round(0).astype(int).astype(str) + "%)")
@@ -354,6 +359,7 @@ def compute_cluster_fandom_summary(df, clusters_df, top_n):
         "cluster_id": n_tags.index,
         "n_tags": n_tags.values,
         "n_works": n_tags.index.map(cluster_totals).fillna(0).astype(int),
+        "n_fandoms": n_tags.index.map(cluster_fandoms).fillna(0).astype(int),
         "top_fandoms": n_tags.index.map(labels).fillna(""),
     })
     # ao3_tag_clusters.csv's cluster_ids are integers, but they arrive as

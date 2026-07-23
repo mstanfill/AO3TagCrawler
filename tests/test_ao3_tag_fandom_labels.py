@@ -179,6 +179,34 @@ def run_fandom_label_checks(tmpdir, script_path):
           crossover_labels["character::XoverCarol"] == "Fandom X (100%), Fandom Y (50%)",
           f"got {crossover_labels['character::XoverCarol']!r}")
 
+    # compute_fandom_summary: distinct-fandom count alongside the top-N label.
+    summary = labels_mod.compute_fandom_summary(df, tag_ids, top_n=3)
+    n_by_tag = dict(zip(summary["tag_id"], summary["n_fandoms"]))
+    label_by_tag = dict(zip(summary["tag_id"], summary["top_fandoms"]))
+    check("compute_fandom_summary columns are [tag_id, n_fandoms, top_fandoms]",
+          list(summary.columns) == ["tag_id", "n_fandoms", "top_fandoms"],
+          f"got {list(summary.columns)}")
+    check("n_fandoms counts every distinct co-occurring fandom (Crossover_Trope spans 3)",
+          n_by_tag["additional_tags::Crossover_Trope"] == 3,
+          f"got {n_by_tag['additional_tags::Crossover_Trope']}")
+    check("n_fandoms=2 for the two-fandom Angst tag",
+          n_by_tag["additional_tags::Angst"] == 2, f"got {n_by_tag['additional_tags::Angst']}")
+    check("n_fandoms=1 for the single-fandom character tag",
+          n_by_tag["character::Bob"] == 1, f"got {n_by_tag['character::Bob']}")
+    check("n_fandoms=0 for a tag absent from the metadata",
+          n_by_tag["additional_tags::Nonexistent"] == 0,
+          f"got {n_by_tag['additional_tags::Nonexistent']}")
+    check("compute_fandom_summary's top_fandoms matches compute_fandom_labels exactly",
+          label_by_tag == labels, f"summary {label_by_tag} vs labels {labels}")
+
+    # n_fandoms is NOT truncated by top_n: with top_n=2 the label shows 2
+    # fandoms but the count still reports all 3 for Crossover_Trope.
+    summary_top2 = labels_mod.compute_fandom_summary(df, tag_ids, top_n=2)
+    xover2 = summary_top2[summary_top2["tag_id"] == "additional_tags::Crossover_Trope"].iloc[0]
+    check("n_fandoms reports all distinct fandoms even when top_n truncates the label",
+          xover2["n_fandoms"] == 3 and xover2["top_fandoms"] == "Fandom X (50%), Fandom Y (33%)",
+          f"got n_fandoms={xover2['n_fandoms']}, top_fandoms={xover2['top_fandoms']!r}")
+
     # CLI: build_arg_parser defaults.
     parser = labels_mod.build_arg_parser()
     default_args = parser.parse_args([])
@@ -212,19 +240,24 @@ def run_fandom_label_checks(tmpdir, script_path):
 
     with open(out_path, newline="", encoding="utf-8") as f:
         out_rows = {row["tag_id"]: row for row in csv.DictReader(f)}
-    check("labeled CSV keeps every original column plus top_fandoms",
-          set(out_rows["character::Bob"].keys()) == {"tag_id", "field", "label", "cluster_id", "top_fandoms"},
+    check("labeled CSV keeps every original column plus n_fandoms and top_fandoms",
+          set(out_rows["character::Bob"].keys())
+          == {"tag_id", "field", "label", "cluster_id", "n_fandoms", "top_fandoms"},
           f"got columns {list(out_rows['character::Bob'].keys())}")
     check("labeled CSV's top_fandoms column matches the direct function call (with --top-n 2)",
           out_rows["additional_tags::Crossover_Trope"]["top_fandoms"] == "Fandom X (50%), Fandom Y (33%)",
           f"got {out_rows['additional_tags::Crossover_Trope']['top_fandoms']!r}")
+    check("labeled CSV's n_fandoms reports all 3 distinct fandoms (not truncated by --top-n 2)",
+          out_rows["additional_tags::Crossover_Trope"]["n_fandoms"] == "3",
+          f"got {out_rows['additional_tags::Crossover_Trope']['n_fandoms']!r}")
 
     check("CLI run writes the per-cluster fandom summary CSV",
           os.path.exists(cluster_fandoms_path))
     with open(cluster_fandoms_path, newline="", encoding="utf-8") as f:
         summary_rows = list(csv.DictReader(f))
-    check("cluster summary CSV has [cluster_id, n_tags, n_works, top_fandoms] columns",
-          summary_rows and list(summary_rows[0].keys()) == ["cluster_id", "n_tags", "n_works", "top_fandoms"],
+    check("cluster summary CSV has [cluster_id, n_tags, n_works, n_fandoms, top_fandoms] columns",
+          summary_rows and list(summary_rows[0].keys())
+          == ["cluster_id", "n_tags", "n_works", "n_fandoms", "top_fandoms"],
           f"got {list(summary_rows[0].keys()) if summary_rows else summary_rows}")
     check("cluster summary CSV has one row per cluster in the input",
           len(summary_rows) == 5, f"got {len(summary_rows)} rows")
@@ -303,9 +336,14 @@ def run_cluster_summary_checks():
     check("n_tags counts the cluster's distinct tags",
           by_cluster["1"]["n_tags"] == 2 and by_cluster["2"]["n_tags"] == 1,
           f"got {summary.to_dict('records')}")
+    check("n_fandoms counts every distinct fandom the cluster's works span "
+          "(cluster 1 spans Fandom A+B = 2; cluster 2 spans X+Y+Z = 3)",
+          by_cluster["1"]["n_fandoms"] == 2 and by_cluster["2"]["n_fandoms"] == 3,
+          f"got {summary.to_dict('records')}")
     check("a cluster whose tags never appear in the metadata keeps its row "
-          "with n_works=0 and an empty label",
-          by_cluster["3"]["n_works"] == 0 and by_cluster["3"]["top_fandoms"] == "",
+          "with n_works=0, n_fandoms=0, and an empty label",
+          by_cluster["3"]["n_works"] == 0 and by_cluster["3"]["n_fandoms"] == 0
+          and by_cluster["3"]["top_fandoms"] == "",
           f"got {by_cluster['3'].to_dict()}")
     check("clusters are ordered numerically (2 before 10), not lexicographically",
           summary["cluster_id"].tolist() == ["1", "2", "3", "10"],
