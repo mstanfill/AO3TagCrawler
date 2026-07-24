@@ -42,6 +42,12 @@ FIELDS_TOP_N_ELIGIBLE = {"fandom", "additional_tags"}
 # more categorical rating/warnings/category fields.
 TAG_PAIR_FIELDS = ["fandom", "relationship", "character", "additional_tags"]
 
+# Field-pair heatmaps (--field-pairs): every metadata field crossed against
+# every other (e.g. category values x fandom values), not just seed tag x
+# field.
+FIELD_PAIR_FIELDS = ["rating", "warnings", "category", "fandom",
+                     "relationship", "character", "additional_tags"]
+
 FIELD_COLORS = {
     "seed_tag": "#4C72B0",
     "rating": "#DD8452",
@@ -159,6 +165,55 @@ def cooccurrence_matrix(counts, field, seed_tags, normalize_by=None):
         # pivot() upcasts to float64 when any (tag, value) combo is missing
         # (NaN before the reindex fill); counts are always whole numbers.
         matrix = matrix.astype(int)
+    return matrix
+
+
+def _ordered_field_pairs(fields):
+    """Every ordered (row_field, col_field) pair with row != col. Ordered,
+    not combinations: row-normalized co-occurrence is directional --
+    "% of each category's works in each fandom" answers a different
+    question than "% of each fandom's works in each category" -- so both
+    directions are generated."""
+    return [(a, b) for a in fields for b in fields if a != b]
+
+
+def field_pair_matrix(df, row_field, col_field, top_n):
+    """Row-normalized co-occurrence between two metadata fields: rows =
+    row_field values, columns = col_field values, cell = the percentage of
+    the row value's works that also carry the column value (e.g. of works
+    in category "Gen", what % are in each fandom). Distinct works only --
+    df is deduplicated by work_id first, since the scraper emits one row
+    per (seed tag, work) and a work's own metadata is identical across
+    those rows. Each field is capped to its top_n most frequent values (by
+    distinct-work frequency, alphabetical tie-break) so high-cardinality
+    fields like fandom/character stay legible; works whose values fall
+    outside the cap contribute to no visible cell, so rows need not sum to
+    100 (same top-N-truncation behavior as the seed-tag heatmaps). A
+    multi-valued cell (e.g. two fandoms) counts the work once per value, so
+    a row can also sum past 100. Returns an empty DataFrame when either
+    field has no values (render_heatmap/write_heatmap_csv skip those)."""
+    deduped = df.drop_duplicates(subset="work_id", keep="first")
+    row_ex = explode_field(deduped, row_field)[["work_id", row_field]].drop_duplicates()
+    col_ex = explode_field(deduped, col_field)[["work_id", col_field]].drop_duplicates()
+
+    row_keep = top_n_values(row_ex, row_field, top_n)
+    col_keep = top_n_values(col_ex, col_field, top_n)
+    if row_keep is not None:
+        row_ex = row_ex[row_ex[row_field].isin(row_keep)]
+    if col_keep is not None:
+        col_ex = col_ex[col_ex[col_field].isin(col_keep)]
+    if row_ex.empty or col_ex.empty:
+        return pd.DataFrame()
+
+    row_totals = row_ex.groupby(row_field)["work_id"].nunique()
+    joint = (row_ex.merge(col_ex, on="work_id")
+                   .groupby([row_field, col_field])["work_id"].nunique()
+                   .reset_index(name="count"))
+    matrix = joint.pivot(index=row_field, columns=col_field, values="count").fillna(0)
+    row_index = sorted(row_totals.index)
+    col_index = sorted(matrix.columns)
+    matrix = matrix.reindex(index=row_index, columns=col_index, fill_value=0)
+    matrix = matrix.div(row_totals.reindex(row_index), axis=0) * 100
     return matrix
 
 
@@ -1305,6 +1360,19 @@ def build_arg_parser():
     parser.add_argument("--tag-pair-heatmap-out", default=None,
                          help="For --tag-pairs: heatmap PNG output "
                               "(default: <--heatmap-out-dir>/heatmap_tag_pairs.png)")
+    parser.add_argument("--field-pairs", action="store_true",
+                         help="Also render a field-vs-field co-occurrence heatmap for "
+                              "every ordered pair of metadata fields (e.g. category x "
+                              "fandom), rows = row-field values, cells = %% of the row "
+                              "value's works that also carry the column value (default: off)")
+    parser.add_argument("--pair-fields", nargs="+", default=FIELD_PAIR_FIELDS,
+                         metavar="FIELD",
+                         help="For --field-pairs: which fields to cross against each "
+                              "other (default: all seven metadata fields)")
+    parser.add_argument("--pair-top-n", type=int, default=30,
+                         help="For --field-pairs: cap each field to its top N most "
+                              "frequent values so high-cardinality fields stay legible "
+                              "(default: 30)")
     return parser
 
 
@@ -1365,6 +1433,22 @@ def main(argv=None):
             base = os.path.splitext(out_path)[0]
             write_heatmap_csv(matrix, base + ".csv")
             render_heatmap_html(matrix, field, base + ".html", normalized=True)
+
+    if args.field_pairs and not args.network_only:
+        pairs = _ordered_field_pairs(args.pair_fields)
+        print(f"Building field-pair heatmaps ({len(pairs)} ordered field pairs)")
+        os.makedirs(args.heatmap_out_dir, exist_ok=True)
+        for row_field, col_field in pairs:
+            matrix = field_pair_matrix(df, row_field, col_field, args.pair_top_n)
+            base = os.path.join(args.heatmap_out_dir,
+                                 f"heatmap_pair_{row_field}_by_{col_field}")
+            title = f"{row_field} by {col_field}"
+            cbar = f"% of {row_field}'s works"
+            render_heatmap(matrix, title, base + ".png", normalized=True,
+                           xlabel=col_field, ylabel=row_field, cbar_label=cbar)
+            write_heatmap_csv(matrix, base + ".csv")
+            render_heatmap_html(matrix, title, base + ".html", normalized=True,
+                                 xlabel=col_field, ylabel=row_field, cbar_label=cbar)
 
     if args.tag_pairs:
         if args.min_pmi <= args.max_pmi:
