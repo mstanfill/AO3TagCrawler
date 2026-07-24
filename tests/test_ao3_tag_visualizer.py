@@ -706,6 +706,51 @@ def run_render_network_physics_checks(tmpdir):
           '"x": 0.0' in static_html or '"x": 0' in static_html)
 
 
+def run_rescrape_dedup_checks(tmpdir):
+    """load_metadata drops exact-duplicate (tag, work_id) rows (re-scrape
+    artifacts) but keeps a work found under several DIFFERENT seed tags, so
+    the per-seed-tag heatmaps stay per-seed-tag while shedding re-scrape
+    inflation. Fixture:
+      (Angst, 301) fandom Alpha         -- kept
+      (Fluff, 301) fandom Alpha         -- same work, 2nd seed tag: KEPT
+      (Angst, 301) fandom Alpha         -- exact re-scrape dup: DROPPED
+      (Angst, 302) fandom Beta          -- kept
+    -> 4 CSV rows collapse to 3. Seed "Angst" spans 2 distinct works (301,
+    302), NOT 3, so its heatmap normalizes by 2 and fandom Alpha reads 50%.
+    Without the dedup the dup row would push Angst to 3 works and Alpha to
+    2/3 = 66.7%."""
+    rows = [
+        base_row(301, "Angst", "Mature", "No Archive Warnings Apply", "Gen", "Alpha", ""),
+        base_row(301, "Fluff", "Mature", "No Archive Warnings Apply", "Gen", "Alpha", ""),
+        base_row(301, "Angst", "Mature", "No Archive Warnings Apply", "Gen", "Alpha", ""),
+        base_row(302, "Angst", "Mature", "No Archive Warnings Apply", "Gen", "Beta", ""),
+    ]
+    csv_path = os.path.join(tmpdir, "rescrape_metadata.csv")
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=METADATA_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    df = viz.load_metadata(csv_path)
+
+    check("load_metadata drops the exact-duplicate (tag, work_id) re-scrape row "
+          "(4 rows -> 3)", len(df) == 3, f"got {len(df)} rows")
+    angst = df[df["tag"] == "Angst"]
+    check("a multi-seed-tag work is KEPT: work 301 still appears under Angst and Fluff",
+          set(df[df["work_id"] == "301"]["tag"]) == {"Angst", "Fluff"},
+          f"got {sorted(set(df[df['work_id'] == '301']['tag']))}")
+    work_counts = df["tag"].value_counts()
+    check("seed tag Angst spans 2 distinct works, not 3 (dup not double-counted)",
+          work_counts["Angst"] == 2, f"got {work_counts['Angst']}")
+
+    exploded = viz.explode_field(df, "fandom")
+    counts = viz.cooccurrence_counts(exploded, "fandom", None)
+    matrix = viz.cooccurrence_matrix(counts, "fandom", ["Angst"], normalize_by=work_counts)
+    check("Angst/Alpha heatmap cell is 50% (1 of 2 works), not 66.7% "
+          "(re-scrape dup would have inflated the denominator)",
+          matrix.loc["Angst", "Alpha"] == 50.0,
+          f"got {matrix.loc['Angst', 'Alpha']}")
+
+
 def main():
     tmpdir = tempfile.mkdtemp(prefix="ao3_viz_test_")
     csv_path = os.path.join(tmpdir, "ao3_tag_metadata.csv")
@@ -1039,6 +1084,10 @@ def main():
 
     # 14. Field x field co-occurrence heatmaps (--field-pairs).
     run_field_pair_checks(tmpdir, script_path)
+
+    # 15. load_metadata drops exact re-scrape (tag, work_id) dups, keeps
+    #     multi-seed-tag rows; seed-tag heatmap % not inflated by re-scrapes.
+    run_rescrape_dedup_checks(tmpdir)
 
     print()
     if FAILURES:
