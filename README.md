@@ -615,9 +615,18 @@ not just the ones that happen to use the field.
 
 ### Output file
 
-**`ao3_tags_per_story_stats.csv`** — one row for the pooled `all_fields` total
-plus one per field, each with: `n_works` (distinct works — the denominator),
-`total_tags`, `mean`, `std`, `min`, `p25`, `median`, `p75`, `max`.
+**`ao3_tags_per_story_stats.csv`** — one row for the pooled `all_fields` total,
+one per field, and a final `seed_tags` row, each with: `n_works` (distinct works
+— the denominator), `total_tags`, `mean`, `std`, `min`, `p25`, `median`, `p75`,
+`max`.
+
+The **`seed_tags`** row is different from the others: it describes how many
+distinct *seed tags* (the searched AO3 tags in the `tag` column) found each
+work, rather than the work's own tags. Because the scraper writes one row per
+`(seed tag, work)`, a work matched by several of your searched tags appears in
+several rows — so this row's `mean` is exactly `(row count) / (distinct works)`,
+i.e. the factor by which `ao3_tag_metadata.csv` has more rows than distinct
+works.
 
 ### Usage
 
