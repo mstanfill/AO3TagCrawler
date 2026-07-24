@@ -36,6 +36,49 @@ resumable steps, rate-limited requests, and retry with exponential backoff.
 
 ---
 
+## The tool suite
+
+Only the scraper touches the network. Everything else is offline analysis of
+the one file it produces — `ao3_tag_metadata.csv` is the hub every other tool
+reads.
+
+```
+AO3 website
+   │  ao3_tag_scraper.py   (the only networked tool)
+   ▼
+ao3_tags.csv ─▶ ao3_tag_work_ids.csv ─▶ ao3_tag_metadata.csv   ← the hub file
+                                             │
+        ┌───────────────┬────────────────────┼───────────────┬────────────────┐
+        ▼               ▼                     ▼               ▼                ▼
+   visualizer.py    analysis.py         counts.py      wrangling.py     analysis.py ─▶
+   network +        frequency +         tags-per-      literal vs       fandom_labels.py
+   heatmaps         clustering          story stats    wrangled usage   labels clusters
+```
+
+| Script | Reads | Writes | What it answers |
+|---|---|---|---|
+| **`ao3_tag_scraper.py`** *(networked)* | — (AO3 tag cloud), or `--tag`/`--tag-url` | `ao3_tags.csv`, `ao3_tag_work_ids.csv`, `ao3_tag_metadata.csv` | Collects the tag list and metadata-only records (one row per `(seed tag, work)`) |
+| **`ao3_tag_visualizer.py`** → [details](#visualization) | `ao3_tag_metadata.csv` | `ao3_tag_network.html`, `heatmaps/heatmap_<field>.{png,csv,html}` (opt. `--tag-pairs`, `--field-pairs` outputs) | How each seed tag relates to its works' attributes |
+| **`ao3_tag_analysis.py`** → [details](#tag-analysis) | `ao3_tag_metadata.csv` | `ao3_additional_tags_frequency.csv`, `ao3_tag_clusters.csv`, `ao3_tag_cluster_network.html` (opt. meta-network, GEXF) | Most/least common additional_tags; cross-field tag communities |
+| **`ao3_tag_fandom_labels.py`** → [details](#fandom-labeling) | `ao3_tag_metadata.csv` + a tag CSV (default `ao3_tag_clusters.csv`) | `ao3_tag_clusters_with_fandoms.csv`, `ao3_cluster_fandoms.csv` | Which fandom(s) each tag/cluster actually co-occurs with |
+| **`ao3_tag_counts.py`** → [details](#tags-per-story) | `ao3_tag_metadata.csv` | `ao3_tags_per_story_stats.csv` | Descriptive stats on distinct tags per work (pooled + per field) |
+| **`ao3_tag_wrangling.py`** → [details](#tag-wrangling) | `ao3_tag_metadata.csv` + optional `ao3_tag_synonyms.csv` | `ao3_seed_tag_literal_usage.csv`, `ao3_seed_tag_synonym_breakdown.csv` | How often authors literally typed the canonical tag vs. a wrangled synonym |
+
+Every script has a notebook twin (`*.ipynb`) with the same logic hand-copied
+in, plus `ao3_tag_cluster_resume.ipynb` for restarting a long clustering run
+from saved state.
+
+**Deduplication (shared).** The scraper emits one row per `(seed tag, work)`
+and appends across runs, so a work is duplicated two ways: once per seed tag
+that found it (real membership) and, on re-scrapes with overlapping seed tags,
+as exact-duplicate `(tag, work_id)` rows (artifacts). `load_metadata` drops the
+exact `(tag, work_id)` duplicates for every tool, and the pooled analyses
+(frequency, clustering, tag/field-pair co-occurrence, per-story counts)
+additionally count each work once — so a work found under several seed tags no
+longer distorts the numbers. See the per-tool sections for specifics.
+
+---
+
 ## Requirements
 
 - Python 3.10 or newer
