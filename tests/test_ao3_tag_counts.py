@@ -111,6 +111,9 @@ def run_stats_checks(tmpdir):
           (by_scope.loc["all_fields", "min"], by_scope.loc["all_fields", "median"],
            by_scope.loc["all_fields", "max"]) == (4, 5.0, 9),
           f"got {by_scope.loc['all_fields', ['min', 'median', 'max']].to_dict()}")
+    check("all_fields mode is 4 (totals 9/5/4 all distinct -> smallest on the tie)",
+          by_scope.loc["all_fields", "mode"] == 4,
+          f"got {by_scope.loc['all_fields', 'mode']}")
 
     check("a within-cell duplicate (Angst, Angst) counts once",
           by_scope.loc["additional_tags", "total_tags"] == 4,
@@ -126,6 +129,9 @@ def run_stats_checks(tmpdir):
     check("a multi-valued fandom cell (A, B) counts 2 for that work",
           by_scope.loc["fandom", "max"] == 2 and by_scope.loc["fandom", "total_tags"] == 4,
           f"got {by_scope.loc['fandom', ['max', 'total_tags']].to_dict()}")
+    check("fandom mode is 1 (per-work fandom counts 2/1/1 -> most common is 1)",
+          by_scope.loc["fandom", "mode"] == 1,
+          f"got {by_scope.loc['fandom', 'mode']}")
     check("a single-work-only field (character) still spans every story (min 0)",
           by_scope.loc["character", "min"] == 0 and by_scope.loc["character", "n_works"] == 3,
           f"got {by_scope.loc['character', ['min', 'n_works']].to_dict()}")
@@ -141,6 +147,8 @@ def run_stats_checks(tmpdir):
           "(work 1 found by 2 seed tags -> max 2, min 1)",
           seed_row["min"] == 1 and seed_row["max"] == 2,
           f"got min={seed_row['min']}, max={seed_row['max']}")
+    check("seed_tags mode is 1 (per-work seed-tag counts 2/1/1 -> most common is 1)",
+          seed_row["mode"] == 1, f"got {seed_row['mode']}")
     check("seed_tags mean is (row count) / (distinct works) = 4/3 = 1.33 "
           "-- the factor by which the CSV has more rows than works",
           seed_row["mean"] == 1.33 and seed_row["total_tags"] == 4 and seed_row["n_works"] == 3,

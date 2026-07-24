@@ -697,8 +697,9 @@ not just the ones that happen to use the field.
 
 **`ao3_tags_per_story_stats.csv`** — one row for the pooled `all_fields` total,
 one per field, and a final `seed_tags` row, each with: `n_works` (distinct works
-— the denominator), `total_tags`, `mean`, `std`, `min`, `p25`, `median`, `p75`,
-`max`.
+— the denominator), `total_tags`, `mean`, `std`, `min`, `p25`, `median`, `mode`,
+`p75`, `max`. `mode` is the most common per-work count (the smallest value on a
+tie, so an all-distinct distribution falls back to its minimum).
 
 The **`seed_tags`** row is different from the others: it describes how many
 distinct *seed tags* (the searched AO3 tags in the `tag` column) found each

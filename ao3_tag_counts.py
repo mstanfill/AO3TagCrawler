@@ -34,7 +34,7 @@ import ao3_tag_analysis as analysis
 import ao3_tag_visualizer as viz
 
 STAT_COLUMNS = ["scope", "n_works", "total_tags", "mean", "std",
-                "min", "p25", "median", "p75", "max"]
+                "min", "p25", "median", "mode", "p75", "max"]
 
 
 def _describe_counts(scope, counts_per_work, all_work_ids):
@@ -43,6 +43,11 @@ def _describe_counts(scope, counts_per_work, all_work_ids):
     full = counts_per_work.reindex(all_work_ids, fill_value=0)
     desc = full.describe()  # count, mean, std, min, 25%, 50%, 75%, max
     std = desc["std"]
+    # The most common per-work count. mode() returns every value tied for most
+    # frequent, sorted ascending (and, over the zero-filled distribution, is
+    # never empty), so .iloc[0] picks the smallest on a tie -- e.g. an all-
+    # distinct distribution falls back to the minimum.
+    mode = int(full.mode().iloc[0])
     return {
         "scope": scope,
         "n_works": int(desc["count"]),
@@ -53,6 +58,7 @@ def _describe_counts(scope, counts_per_work, all_work_ids):
         "min": int(desc["min"]),
         "p25": round(float(desc["25%"]), 1),
         "median": round(float(desc["50%"]), 1),
+        "mode": mode,
         "p75": round(float(desc["75%"]), 1),
         "max": int(desc["max"]),
     }
