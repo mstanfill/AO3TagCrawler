@@ -130,6 +130,22 @@ def run_stats_checks(tmpdir):
           by_scope.loc["character", "min"] == 0 and by_scope.loc["character", "n_works"] == 3,
           f"got {by_scope.loc['character', ['min', 'n_works']].to_dict()}")
 
+    # seed_tags: how many distinct searched tags found each work. Fixture:
+    # work 1 under Seed1+Seed2 (2), works 2 and 3 under Seed1 only (1 each).
+    seed = counts.seed_tags_per_work_stats(df)
+    check("seed_tags stats is a single row with the standard columns",
+          seed["scope"].tolist() == ["seed_tags"] and list(seed.columns) == counts.STAT_COLUMNS,
+          f"got {seed['scope'].tolist()}, {list(seed.columns)}")
+    seed_row = seed.iloc[0]
+    check("seed_tags counts distinct searched tags per work "
+          "(work 1 found by 2 seed tags -> max 2, min 1)",
+          seed_row["min"] == 1 and seed_row["max"] == 2,
+          f"got min={seed_row['min']}, max={seed_row['max']}")
+    check("seed_tags mean is (row count) / (distinct works) = 4/3 = 1.33 "
+          "-- the factor by which the CSV has more rows than works",
+          seed_row["mean"] == 1.33 and seed_row["total_tags"] == 4 and seed_row["n_works"] == 3,
+          f"got {seed_row.to_dict()}")
+
 
 def run_cli_checks(tmpdir, script_path):
     parser = counts.build_arg_parser()
@@ -155,8 +171,11 @@ def run_cli_checks(tmpdir, script_path):
           f"got {list(next(iter(out_rows.values())).keys())}")
     check("stats CSV matches the direct function call (all_fields mean 6.0)",
           out_rows["all_fields"]["mean"] == "6.0", f"got {out_rows['all_fields']['mean']!r}")
-    check("stats CSV has all_fields + one row per field (8 rows)",
-          len(out_rows) == 8, f"got {len(out_rows)} rows")
+    check("stats CSV has all_fields + one row per field + seed_tags (9 rows)",
+          len(out_rows) == 9, f"got {len(out_rows)} rows")
+    check("stats CSV includes the seed_tags row (mean 1.33 on the fixture)",
+          "seed_tags" in out_rows and out_rows["seed_tags"]["mean"] == "1.33",
+          f"got {out_rows.get('seed_tags')}")
 
 
 def main():
