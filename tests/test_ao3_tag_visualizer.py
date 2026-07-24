@@ -579,6 +579,95 @@ def run_fast_populate_network_checks():
           len(net_big.node_ids) == n_nodes, f"got {len(net_big.node_ids)}")
 
 
+def run_field_pair_checks(tmpdir, script_path):
+    # field_pair_matrix: row-normalized field x field co-occurrence.
+    # Fixture (work 1 appears under two seed tags -> must dedupe to one):
+    #   work 1: category Gen, fandom "A, B" (multi-valued)
+    #   work 2: category Gen, fandom A
+    #   work 3: category F/M, fandom A
+    rows = [
+        base_row(1, "S1", "Teen", "None", "Gen", "A, B", ""),
+        base_row(1, "S2", "Teen", "None", "Gen", "A, B", ""),
+        base_row(2, "S1", "Teen", "None", "Gen", "A", ""),
+        base_row(3, "S1", "Teen", "None", "F/M", "A", ""),
+    ]
+    df = viz.pd.DataFrame(rows).astype(str)
+
+    m = viz.field_pair_matrix(df, "category", "fandom", top_n=30)
+    check("field_pair_matrix rows are the row field's values, cols the col field's",
+          sorted(m.index) == ["F/M", "Gen"] and sorted(m.columns) == ["A", "B"],
+          f"got index {list(m.index)}, cols {list(m.columns)}")
+    # Gen works = {1, 2} (the two seed-tag rows for work 1 dedupe to one).
+    # Gen&A: {1,2} -> 100%; Gen&B: {1} -> 50%.
+    check("row-normalized %, deduped by work_id, multi-valued col counted once "
+          "(Gen->A 100%, Gen->B 50%)",
+          round(m.loc["Gen", "A"], 1) == 100.0 and round(m.loc["Gen", "B"], 1) == 50.0,
+          f"got {m.loc['Gen'].to_dict()}")
+    check("a row value not co-occurring with a col value is 0 (F/M->B)",
+          round(m.loc["F/M", "B"], 1) == 0.0, f"got {m.loc['F/M', 'B']}")
+
+    # Directional: fandom-by-category is a different matrix, normalized by
+    # fandom. A works = {1,2,3}: A->Gen 2/3=66.7, A->F/M 1/3=33.3.
+    m_t = viz.field_pair_matrix(df, "fandom", "category", top_n=30)
+    check("row-normalization is directional (fandom-by-category differs from the transpose)",
+          round(m_t.loc["A", "Gen"], 1) == 66.7 and round(m_t.loc["A", "F/M"], 1) == 33.3,
+          f"got {m_t.loc['A'].to_dict()}")
+
+    # top_n cap: only the single most frequent fandom value survives n=1.
+    m_cap = viz.field_pair_matrix(df, "category", "fandom", top_n=1)
+    check("--pair-top-n caps each field to its top-N values (n=1 -> one fandom column)",
+          list(m_cap.columns) == ["A"], f"got {list(m_cap.columns)}")
+
+    check("_ordered_field_pairs yields every ordered pair (7 fields -> 42)",
+          len(viz._ordered_field_pairs(viz.FIELD_PAIR_FIELDS)) == 42)
+    check("_ordered_field_pairs never pairs a field with itself",
+          all(a != b for a, b in viz._ordered_field_pairs(viz.FIELD_PAIR_FIELDS)))
+
+    # CLI: --field-pairs writes a PNG/CSV/HTML per ordered pair; a default
+    # run writes none.
+    csv_path = os.path.join(tmpdir, "field_pair_metadata.csv")
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=METADATA_FIELDS)
+        w.writeheader()
+        w.writerows(rows)
+
+    fp_dir = os.path.join(tmpdir, "field_pairs_run")
+    result = subprocess.run(
+        [sys.executable, script_path, "--input", csv_path, "--heatmaps-only",
+         "--field-pairs", "--pair-fields", "category", "fandom", "rating",
+         "--heatmap-out-dir", fp_dir],
+        capture_output=True, text=True,
+    )
+    check("--field-pairs run exits 0", result.returncode == 0, f"stderr: {result.stderr}")
+    # 3 chosen fields -> 6 ordered pairs -> 6 of each format.
+    for row_field, col_field in [("category", "fandom"), ("fandom", "category"),
+                                  ("rating", "category")]:
+        stem = os.path.join(fp_dir, f"heatmap_pair_{row_field}_by_{col_field}")
+        check(f"--field-pairs wrote heatmap_pair_{row_field}_by_{col_field}.{{png,csv,html}}",
+              all(os.path.exists(stem + ext) for ext in (".png", ".csv", ".html")),
+              f"missing for {row_field}_by_{col_field}")
+    n_pngs = len([p for p in os.listdir(fp_dir)
+                  if p.startswith("heatmap_pair_") and p.endswith(".png")])
+    check("3 --pair-fields produce 6 ordered-pair PNGs", n_pngs == 6, f"got {n_pngs}")
+
+    cat_by_fandom = viz.pd.read_csv(
+        os.path.join(fp_dir, "heatmap_pair_category_by_fandom.csv"), index_col=0)
+    check("field-pair CSV matches the direct matrix (Gen->A = 100.0)",
+          round(cat_by_fandom.loc["Gen", "A"], 1) == 100.0,
+          f"got {cat_by_fandom.loc['Gen', 'A']}")
+
+    # A default run (no --field-pairs) writes no pair heatmaps.
+    default_dir = os.path.join(tmpdir, "no_field_pairs_run")
+    subprocess.run(
+        [sys.executable, script_path, "--input", csv_path, "--heatmaps-only",
+         "--heatmap-out-dir", default_dir],
+        capture_output=True, text=True, check=True,
+    )
+    check("without --field-pairs, no heatmap_pair_* files are written",
+          not any(p.startswith("heatmap_pair_") for p in os.listdir(default_dir)),
+          f"got {[p for p in os.listdir(default_dir) if p.startswith('heatmap_pair_')]}")
+
+
 def run_render_network_physics_checks(tmpdir):
     """--physics toggle: physics=True (default) preserves the existing
     barnesHut/stabilization behavior; physics=False (used by
@@ -947,6 +1036,9 @@ def main():
 
     # 13. Heatmap CSV/HTML export unit checks (escaping, NaN masking).
     run_heatmap_export_checks(tmpdir)
+
+    # 14. Field x field co-occurrence heatmaps (--field-pairs).
+    run_field_pair_checks(tmpdir, script_path)
 
     print()
     if FAILURES:

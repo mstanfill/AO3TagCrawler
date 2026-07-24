@@ -235,6 +235,16 @@ tag `Angst` × displayed tag `Angst`) below 100% is not a bug — see
 heatmap of lift/PMI values, the heatmap in the same three formats
 (never-co-occurring pairs stay blank in all three, distinct from a meaningful 0)
 
+**`heatmaps/heatmap_pair_<row>_by_<col>.png` / `.csv` / `.html`** — only written
+with `--field-pairs`: a field-vs-field co-occurrence heatmap for every ordered
+pair of metadata fields (e.g. `category` × `fandom`), rows = the row field's
+values, columns = the col field's, each cell the **% of the row value's works
+that also carry the column value** (e.g. of works in category `Gen`, what % are
+in each fandom). Row-normalized and therefore directional, so both directions
+are written (`category_by_fandom` and `fandom_by_category` answer different
+questions). Distinct works only; each field capped to its top `--pair-top-n`
+values. Same three formats as the other heatmaps
+
 ### Usage
 
 ```bash
@@ -267,6 +277,14 @@ python ao3_tag_visualizer.py --tag-pairs
 # Adjust the tag-pair thresholds: only the top 60 tags by document frequency,
 # require at least 5 co-occurrences, and widen the "most/least likely" bands
 python ao3_tag_visualizer.py --tag-pairs --top-tags 60 --min-pair-count 5 --min-pmi 1.5 --max-pmi -1.5
+
+# Also render field-vs-field co-occurrence heatmaps for every ordered pair of
+# metadata fields (e.g. category x fandom), row-normalized. Off by default.
+python ao3_tag_visualizer.py --field-pairs
+
+# Narrow to specific fields (all ordered pairs among them) and cap each field's
+# values -- e.g. just category, fandom, and rating, top 20 values each.
+python ao3_tag_visualizer.py --field-pairs --pair-fields category fandom rating --pair-top-n 20
 ```
 
 `--tag-pairs` answers a different question than the rest of this tool: not "which
@@ -315,6 +333,12 @@ work) whose lift would otherwise look enormous but isn't statistically meaningfu
                                 (default: ao3_tag_pair_network.html)
 --tag-pair-heatmap-out FILE    Tag-pair heatmap PNG output
                                 (default: heatmaps/heatmap_tag_pairs.png)
+--field-pairs             Also render a field-vs-field co-occurrence heatmap for
+                           every ordered pair of metadata fields, row-normalized
+--pair-fields FIELD ...    For --field-pairs: which fields to cross (default: all
+                           seven metadata fields)
+--pair-top-n N            For --field-pairs: cap each field to its top N values
+                           (default: 30)
 -h, --help
 ```
 
