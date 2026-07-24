@@ -154,6 +154,37 @@ def write_clustering_fixture_csv(path):
     return rows
 
 
+def run_frequency_dedup_check(tmpdir):
+    """A pooled frequency ranking must count each work once, even though the
+    scraper duplicates a work across every seed tag that found it. Fixture:
+    ONE work (500) carrying additional_tag "MultiSeed", found under three
+    different seed tags (rows survive load_metadata's exact-(tag, work_id)
+    dedup because the `tag` values differ), plus one exact-duplicate
+    (tag, work_id) re-scrape row that load_metadata should drop. "MultiSeed"
+    must count 1 (distinct works), not 3 or 4."""
+    rows = [
+        base_row(500, additional_tags="MultiSeed", tag="SeedX"),
+        base_row(500, additional_tags="MultiSeed", tag="SeedY"),
+        base_row(500, additional_tags="MultiSeed", tag="SeedZ"),
+        base_row(500, additional_tags="MultiSeed", tag="SeedZ"),  # exact re-scrape dup
+    ]
+    csv_path = os.path.join(tmpdir, "frequency_dedup.csv")
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=METADATA_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    df = viz.load_metadata(csv_path)
+
+    check("load_metadata drops the exact-duplicate (tag, work_id) re-scrape row "
+          "(4 CSV rows -> 3 distinct (tag, work_id))", len(df) == 3,
+          f"got {len(df)} rows")
+    _, most_non_seed, _ = analysis.additional_tags_frequency(df, min_bottom_count=1)
+    multi = most_non_seed[most_non_seed["additional_tags"] == "MultiSeed"]
+    check("additional_tags_frequency counts a multi-seed-tag work once "
+          "(MultiSeed count == 1, not per seed tag)",
+          multi["count"].tolist() == [1], f"got {multi.to_dict('records')}")
+
+
 def run_frequency_checks(tmpdir, script_path):
     csv_path = os.path.join(tmpdir, "frequency_metadata.csv")
     write_frequency_fixture_csv(csv_path)
@@ -200,6 +231,8 @@ def run_frequency_checks(tmpdir, script_path):
     check("least-frequent tie-break is alphabetical (Tie_A before Tie_B)",
           tied_least["additional_tags"].tolist() == ["Tie_A", "Tie_B"],
           f"got {tied_least['additional_tags'].tolist()}")
+
+    run_frequency_dedup_check(tmpdir)
 
     # CLI: build_arg_parser defaults.
     parser = analysis.build_arg_parser()

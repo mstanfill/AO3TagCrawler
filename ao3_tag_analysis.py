@@ -62,7 +62,14 @@ def additional_tags_frequency(df, min_bottom_count=2):
     count >= min_bottom_count (default 2, i.e. excludes true one-off
     singletons), sorted lowest-count first (alphabetical tie-break)."""
     seed_tags = set(df["tag"].unique())
-    exploded = viz.explode_field(df, "additional_tags")
+    # Pooled ranking, so count each work once. A work found under k distinct
+    # seed tags has k rows (distinct `tag` values) that survive load_metadata's
+    # exact-(tag, work_id) dedup; without a work_id dedup here its
+    # additional_tags would be counted k times, inflating the frequencies. The
+    # seed_tags set above is taken from the full df -- deduping doesn't drop any
+    # searched tag.
+    deduped = df.drop_duplicates(subset="work_id", keep="first")
+    exploded = viz.explode_field(deduped, "additional_tags")
     counts = viz.total_value_counts(exploded, "additional_tags")
     counts = counts.reset_index()
     counts.columns = ["additional_tags", "count"]

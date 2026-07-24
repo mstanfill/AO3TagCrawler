@@ -75,6 +75,15 @@ def load_metadata(input_csv):
     if df.empty:
         print(f"{input_csv} has no data rows.", file=sys.stderr)
         sys.exit(1)
+    # The scraper emits one row per (seed tag, work) and appends across runs,
+    # so re-scraping with overlapping seed tags produces exact-duplicate
+    # (tag, work_id) rows. Those are pure re-scrape artifacts -- never
+    # meaningful -- so drop them at the single load choke point. This does NOT
+    # collapse a work found under several DIFFERENT seed tags (distinct `tag`
+    # values survive): the per-seed-tag network/heatmaps still count each work
+    # under every seed tag that genuinely found it, but stop being inflated by
+    # duplicate scrapes.
+    df = df.drop_duplicates(subset=["tag", "work_id"], keep="first").reset_index(drop=True)
     return df
 
 

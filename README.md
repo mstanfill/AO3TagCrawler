@@ -206,6 +206,19 @@ existing `ao3_tag_metadata.csv` and visualizes connections between the seed tag 
 each work's `rating`, `warnings`, `category`, `fandom`, and `additional_tags`. It has
 **no network dependency** — it only reads a local CSV.
 
+**Deduplication.** The scraper emits one row per `(seed tag, work)` and appends
+across runs, so a work is duplicated two ways: it appears once for **each seed
+tag** that found it (real membership — a work under three seed tags legitimately
+belongs to all three), and re-scraping with overlapping seed tags produces
+**exact-duplicate `(tag, work_id)` rows** (pure artifacts). `load_metadata`
+drops the exact `(tag, work_id)` duplicates at read time, so the per-seed-tag
+network and heatmaps count each work under every seed tag that found it but are
+never inflated by re-scrapes. Analyses that pool across seed tags deduplicate
+further by `work_id` so a multi-seed-tag work is counted once: the tag-pair and
+field-pair co-occurrence, clustering (`ao3_tag_analysis.py`), the
+additional-tags frequency ranking, and the per-story tag counts
+(`ao3_tag_counts.py`) all operate on distinct works.
+
 | Feature | Detail |
 |---|---|
 | **Interactive network graph** | Bipartite graph: seed tags <-> attribute values, edges weighted by co-occurrence count. Self-contained HTML — no internet connection needed to view it |
