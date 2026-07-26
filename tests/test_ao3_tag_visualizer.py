@@ -204,7 +204,12 @@ def run_tag_pair_checks(tmpdir, script_path):
     check("tag-pair fixture has 11 CSV rows", len(df) == 11)
     check("tag-pair fixture has 10 distinct work_ids", df["work_id"].nunique() == 10)
 
-    tag_table = viz.build_document_tag_table(df)
+    # Exercise the field-agnostic tag-pair machinery over the full folksonomy
+    # pool (fandom/relationship/character/additional_tags) by passing fields
+    # explicitly -- the default TAG_PAIR_FIELDS now excludes relationship/
+    # character (see the reduced-default checks in the CLI section below).
+    ALL_FOLKSONOMY = ["fandom", "relationship", "character", "additional_tags"]
+    tag_table = viz.build_document_tag_table(df, fields=ALL_FOLKSONOMY)
     incidence_all = viz.build_tag_incidence_matrix(
         tag_table, set(tag_table["tag_id"].unique()))
     check("incidence matrix has 10 document rows (not 11)", incidence_all.shape[0] == 10)
@@ -215,6 +220,14 @@ def run_tag_pair_checks(tmpdir, script_path):
     n_docs = df["work_id"].nunique()
     all_tags = set(tag_table["tag_id"].unique())
     check("tag-pair fixture has exactly 9 distinct tags", len(all_tags) == 9, f"got {all_tags}")
+
+    # The DEFAULT pool (build_document_tag_table with no fields=) now excludes
+    # relationship/character -- that's the whole point of the reduced default.
+    default_pool = set(viz.build_document_tag_table(df)["tag_id"].unique())
+    check("default tag-pair pool excludes relationship:: and character:: tags",
+          not any(t.startswith(("relationship::", "character::")) for t in default_pool)
+          and any(t.startswith("fandom::") for t in default_pool),
+          f"got {sorted(default_pool)}")
 
     raw_stats = viz.tag_pair_statistics(incidence_all, n_docs)
 
@@ -259,7 +272,8 @@ def run_tag_pair_checks(tmpdir, script_path):
           and abs(hurt_ab["lift"].iloc[0] - 10 / 3) < 1e-9,
           f"got {hurt_ab}")
     pair_stats_default, keep_tags_default = viz.build_tag_pair_data(
-        df, top_tags=40, min_pair_count=2, min_pmi=1.0, max_pmi=-1.0)
+        df, top_tags=40, min_pair_count=2, min_pmi=1.0, max_pmi=-1.0,
+        fields=ALL_FOLKSONOMY)
     check("Hurt/A-B survives default min_pair_count/min_pmi filtering",
           not pair_row(pair_stats_default, "additional_tags::Hurt", "relationship::A/B").empty)
     check("Alpha/Whump (boring middle) is excluded by default thresholds",
@@ -292,6 +306,15 @@ def run_tag_pair_checks(tmpdir, script_path):
     parser = viz.build_arg_parser()
     default_cli_args = parser.parse_args(["--input", csv_path])
     check("--tag-pairs defaults to False", default_cli_args.tag_pairs is False)
+    check("--tag-pair-fields defaults to fandom/additional_tags (excludes relationship/character)",
+          default_cli_args.tag_pair_fields == ["fandom", "additional_tags"]
+          and viz.TAG_PAIR_FIELDS == ["fandom", "additional_tags"],
+          f"got {default_cli_args.tag_pair_fields}")
+    override_tpf = parser.parse_args(
+        ["--input", csv_path, "--tag-pair-fields", "fandom", "character"])
+    check("--tag-pair-fields override parses the listed fields",
+          override_tpf.tag_pair_fields == ["fandom", "character"],
+          f"got {override_tpf.tag_pair_fields}")
     check("--top-tags defaults to 40", default_cli_args.top_tags == 40)
     check("--min-pair-count defaults to 2", default_cli_args.min_pair_count == 2)
     check("--min-pmi defaults to 1.0", default_cli_args.min_pmi == 1.0)
@@ -323,6 +346,7 @@ def run_tag_pair_checks(tmpdir, script_path):
     with_flag_tag_pair_network = os.path.join(with_flag_dir, "ao3_tag_pair_network.html")
     result_with_flag = subprocess.run(
         [sys.executable, script_path, "--input", csv_path, "--tag-pairs",
+         "--tag-pair-fields", "fandom", "relationship", "character", "additional_tags",
          "--network-out", with_flag_network, "--heatmap-out-dir", with_flag_heatmap_dir,
          "--tag-pair-network-out", with_flag_tag_pair_network],
         capture_output=True, text=True,
@@ -618,8 +642,12 @@ def run_field_pair_checks(tmpdir, script_path):
     check("--pair-top-n caps each field to its top-N values (n=1 -> one fandom column)",
           list(m_cap.columns) == ["A"], f"got {list(m_cap.columns)}")
 
-    check("_ordered_field_pairs yields every ordered pair (7 fields -> 42)",
-          len(viz._ordered_field_pairs(viz.FIELD_PAIR_FIELDS)) == 42)
+    check("FIELD_PAIR_FIELDS excludes relationship/character (5 fields, not 7)",
+          "relationship" not in viz.FIELD_PAIR_FIELDS
+          and "character" not in viz.FIELD_PAIR_FIELDS
+          and len(viz.FIELD_PAIR_FIELDS) == 5, f"got {viz.FIELD_PAIR_FIELDS}")
+    check("_ordered_field_pairs yields every ordered pair (5 fields -> 20)",
+          len(viz._ordered_field_pairs(viz.FIELD_PAIR_FIELDS)) == 20)
     check("_ordered_field_pairs never pairs a field with itself",
           all(a != b for a, b in viz._ordered_field_pairs(viz.FIELD_PAIR_FIELDS)))
 
@@ -704,6 +732,95 @@ def run_render_network_physics_checks(tmpdir):
           stabilize_marker not in static_html)
     check("physics=False network HTML still carries the fixed x/y positions through",
           '"x": 0.0' in static_html or '"x": 0' in static_html)
+
+
+def run_field_pmi_checks(tmpdir, script_path):
+    """PMI heatmaps pairing an anchor field (fandom) against another field.
+    Fixture (7 distinct works):
+      Alpha -> works 1,2,3 (rating Mature)
+      Beta  -> works 4,5,6 (rating Teen)
+      Gamma -> work  7      (rating Mature)
+    So fandom counts Alpha=3, Beta=3, Gamma=1; rating Mature=4, Teen=3;
+    n_docs=7. pmi = log2(joint*n_docs / (row_total*col_total)):
+      Alpha/Mature: 3*7/(3*4)=1.75  -> pmi=log2(1.75)~=0.807
+      Beta/Teen:    3*7/(3*3)=2.333 -> pmi=log2(7/3)~=1.222
+      Alpha/Teen:   joint 0          -> NaN (blank)
+      Gamma/Mature: joint 1          -> dropped by --field-pmi-min-count 2 (NaN)
+    """
+    rows = [
+        base_row(1, "S", "Mature", "No Archive Warnings Apply", "Gen", "Alpha", ""),
+        base_row(2, "S", "Mature", "No Archive Warnings Apply", "Gen", "Alpha", ""),
+        base_row(3, "S", "Mature", "No Archive Warnings Apply", "Gen", "Alpha", ""),
+        base_row(4, "S", "Teen", "No Archive Warnings Apply", "Gen", "Beta", ""),
+        base_row(5, "S", "Teen", "No Archive Warnings Apply", "Gen", "Beta", ""),
+        base_row(6, "S", "Teen", "No Archive Warnings Apply", "Gen", "Beta", ""),
+        base_row(7, "S", "Mature", "No Archive Warnings Apply", "Gen", "Gamma", ""),
+    ]
+    csv_path = os.path.join(tmpdir, "field_pmi_metadata.csv")
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=METADATA_FIELDS)
+        w.writeheader()
+        w.writerows(rows)
+    df = viz.load_metadata(csv_path)
+
+    m = viz.field_pair_pmi_matrix(df, "fandom", "rating", top_n=None, min_count=2)
+    check("PMI matrix rows are the anchor (fandom) values, columns the paired field",
+          list(m.index) == ["Alpha", "Beta", "Gamma"] and list(m.columns) == ["Mature", "Teen"],
+          f"got index={list(m.index)}, columns={list(m.columns)}")
+    check("Alpha/Mature PMI is log2(1.75)",
+          abs(m.loc["Alpha", "Mature"] - viz.np.log2(1.75)) < 1e-9,
+          f"got {m.loc['Alpha', 'Mature']}")
+    check("Beta/Teen PMI is log2(7/3)",
+          abs(m.loc["Beta", "Teen"] - viz.np.log2(7 / 3)) < 1e-9,
+          f"got {m.loc['Beta', 'Teen']}")
+    check("a never-co-occurring pair (Alpha/Teen) is NaN (blank), not 0",
+          viz.pd.isna(m.loc["Alpha", "Teen"]), f"got {m.loc['Alpha', 'Teen']}")
+    check("a single-co-occurrence pair (Gamma/Mature) is dropped by min_count=2 (NaN)",
+          viz.pd.isna(m.loc["Gamma", "Mature"]), f"got {m.loc['Gamma', 'Mature']}")
+
+    m1 = viz.field_pair_pmi_matrix(df, "fandom", "rating", top_n=None, min_count=1)
+    check("min_count=1 keeps the single-co-occurrence Gamma/Mature cell",
+          abs(m1.loc["Gamma", "Mature"] - viz.np.log2(1.75)) < 1e-9,
+          f"got {m1.loc['Gamma', 'Mature']}")
+
+    # CLI: defaults + opt-in gating.
+    parser = viz.build_arg_parser()
+    default_args = parser.parse_args(["--input", csv_path])
+    check("--field-pmi defaults to False", default_args.field_pmi is False)
+    check("--field-pmi-anchor defaults to fandom", default_args.field_pmi_anchor == "fandom")
+    check("--field-pmi-fields defaults to additional_tags/rating/warnings/category",
+          default_args.field_pmi_fields == ["additional_tags", "rating", "warnings", "category"],
+          f"got {default_args.field_pmi_fields}")
+    check("--field-pmi-min-count defaults to 2", default_args.field_pmi_min_count == 2)
+
+    out_dir = os.path.join(tmpdir, "field_pmi_run")
+    result = subprocess.run(
+        [sys.executable, script_path, "--input", csv_path, "--heatmaps-only",
+         "--field-pmi", "--field-pmi-fields", "rating",
+         "--network-out", os.path.join(out_dir, "network.html"),
+         "--heatmap-out-dir", os.path.join(out_dir, "heatmaps")],
+        capture_output=True, text=True,
+    )
+    check("main() with --field-pmi exits 0", result.returncode == 0, f"stderr: {result.stderr}")
+    for ext in ("png", "csv", "html"):
+        p = os.path.join(out_dir, "heatmaps", f"heatmap_pmi_fandom_by_rating.{ext}")
+        check(f"--field-pmi writes heatmap_pmi_fandom_by_rating.{ext}", os.path.exists(p),
+              f"missing {p}")
+    pmi_csv = viz.pd.read_csv(
+        os.path.join(out_dir, "heatmaps", "heatmap_pmi_fandom_by_rating.csv"), index_col=0)
+    check("--field-pmi CSV keeps blank (never-co-occur) cells as NaN, not 0",
+          pmi_csv.isna().any().any(), "expected at least one NaN cell")
+
+    no_flag_dir = os.path.join(tmpdir, "no_field_pmi_run")
+    subprocess.run(
+        [sys.executable, script_path, "--input", csv_path, "--heatmaps-only",
+         "--network-out", os.path.join(no_flag_dir, "network.html"),
+         "--heatmap-out-dir", os.path.join(no_flag_dir, "heatmaps")],
+        capture_output=True, text=True,
+    )
+    check("without --field-pmi, no heatmap_pmi_* files are written",
+          not os.path.exists(os.path.join(no_flag_dir, "heatmaps",
+                                          "heatmap_pmi_fandom_by_rating.png")))
 
 
 def run_rescrape_dedup_checks(tmpdir):
@@ -1088,6 +1205,9 @@ def main():
     # 15. load_metadata drops exact re-scrape (tag, work_id) dups, keeps
     #     multi-seed-tag rows; seed-tag heatmap % not inflated by re-scrapes.
     run_rescrape_dedup_checks(tmpdir)
+
+    # 16. Field-pair PMI heatmaps (--field-pmi).
+    run_field_pmi_checks(tmpdir, script_path)
 
     print()
     if FAILURES:

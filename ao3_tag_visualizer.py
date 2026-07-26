@@ -39,14 +39,16 @@ FIELDS_TO_VISUALIZE = ["rating", "warnings", "category", "fandom", "additional_t
 FIELDS_TOP_N_ELIGIBLE = {"fandom", "additional_tags"}
 
 # Tag-pair co-occurrence (--tag-pairs): folksonomy-style tags only, not the
-# more categorical rating/warnings/category fields.
-TAG_PAIR_FIELDS = ["fandom", "relationship", "character", "additional_tags"]
+# more categorical rating/warnings/category fields. relationship and character
+# are excluded by default (they distort the co-occurrence signal) -- override
+# with --tag-pair-fields.
+TAG_PAIR_FIELDS = ["fandom", "additional_tags"]
 
-# Field-pair heatmaps (--field-pairs): every metadata field crossed against
-# every other (e.g. category values x fandom values), not just seed tag x
-# field.
-FIELD_PAIR_FIELDS = ["rating", "warnings", "category", "fandom",
-                     "relationship", "character", "additional_tags"]
+# Field-pair heatmaps (--field-pairs): metadata fields crossed against each
+# other (e.g. category values x fandom values), not just seed tag x field.
+# relationship and character are excluded by default -- override with
+# --pair-fields.
+FIELD_PAIR_FIELDS = ["rating", "warnings", "category", "fandom", "additional_tags"]
 
 FIELD_COLORS = {
     "seed_tag": "#4C72B0",
@@ -223,6 +225,52 @@ def field_pair_matrix(df, row_field, col_field, top_n):
     col_index = sorted(matrix.columns)
     matrix = matrix.reindex(index=row_index, columns=col_index, fill_value=0)
     matrix = matrix.div(row_totals.reindex(row_index), axis=0) * 100
+    return matrix
+
+
+def field_pair_pmi_matrix(df, row_field, col_field, top_n, min_count=2):
+    """PMI (log2 lift) between two metadata fields: rows = row_field values,
+    columns = col_field values, cell = pmi(row value, col value) =
+    log2(joint * n_docs / (row_total * col_total)) -- the same statistic
+    tag_pair_statistics computes, but for one field against another rather
+    than over the whole tag pool. Distinct works only (df deduped by work_id
+    first, like field_pair_matrix), each field capped to its top_n most
+    frequent values. A cell is NaN -- blank, deliberately NOT 0, since 0 is a
+    meaningful "independent" PMI -- when the pair never co-occurs or co-occurs
+    in fewer than min_count works (a low-sample pair has an enormous but
+    meaningless lift, the same reason apply_min_pair_count exists). n_docs is
+    the true total distinct-work count. Returns an empty DataFrame when either
+    field has no values (render_heatmap/write_heatmap_csv skip those)."""
+    deduped = df.drop_duplicates(subset="work_id", keep="first")
+    n_docs = deduped["work_id"].nunique()
+    row_ex = explode_field(deduped, row_field)[["work_id", row_field]].drop_duplicates()
+    col_ex = explode_field(deduped, col_field)[["work_id", col_field]].drop_duplicates()
+
+    row_keep = top_n_values(row_ex, row_field, top_n)
+    col_keep = top_n_values(col_ex, col_field, top_n)
+    if row_keep is not None:
+        row_ex = row_ex[row_ex[row_field].isin(row_keep)]
+    if col_keep is not None:
+        col_ex = col_ex[col_ex[col_field].isin(col_keep)]
+    if row_ex.empty or col_ex.empty:
+        return pd.DataFrame()
+
+    row_totals = row_ex.groupby(row_field)["work_id"].nunique()
+    col_totals = col_ex.groupby(col_field)["work_id"].nunique()
+    joint = (row_ex.merge(col_ex, on="work_id")
+                   .groupby([row_field, col_field])["work_id"].nunique()
+                   .reset_index(name="joint"))
+    joint = joint[joint["joint"] >= min_count]
+
+    row_index = sorted(row_totals.index)
+    col_index = sorted(col_totals.index)
+    matrix = pd.DataFrame(np.nan, index=row_index, columns=col_index, dtype=float)
+    for _, r in joint.iterrows():
+        rv, cv = r[row_field], r[col_field]
+        lift = r["joint"] * n_docs / (row_totals[rv] * col_totals[cv])
+        matrix.loc[rv, cv] = np.log2(lift)
+    matrix.index.name = row_field
+    matrix.columns.name = col_field
     return matrix
 
 
@@ -913,20 +961,22 @@ _TAG_PAIR_FILTER_SCRIPT_TEMPLATE = """
 
 def _tag_pair_filter_controls_html(graph):
     """Same shape as _filter_controls_html, for the one-mode tag-pair graph:
-    checkboxes iterate TAG_PAIR_FIELDS (every node's group is checkbox-
-    controlled -- there's no privileged always-visible class like
-    seed_tag), and the tag picker's underlying data is
-    [{"id","label","field"}, ...] rather than a flat label list, since
-    label alone can collide across fields."""
+    every node's group is checkbox-controlled (there's no privileged
+    always-visible class like seed_tag), and the tag picker's underlying data
+    is [{"id","label","field"}, ...] rather than a flat label list, since
+    label alone can collide across fields. Checkboxes are derived from the
+    fields actually present in the graph (not the TAG_PAIR_FIELDS constant),
+    so a --tag-pair-fields override still gets a checkbox per field."""
     all_tags = _all_tags_from_graph(graph)
     all_tags_json = json.dumps(all_tags).replace("</script", "<\\/script")
 
+    fields_in_graph = sorted({data["group"] for _, data in graph.nodes(data=True)})
     checkbox_items = "\n".join(
         '<label class="ao3-cat-label">'
         f'<input type="checkbox" class="ao3-cat-checkbox" data-group="{field}" checked>'
         f'<span class="ao3-swatch" style="background-color:{FIELD_COLORS[field]};"></span>'
         f'{field}</label>'
-        for field in TAG_PAIR_FIELDS
+        for field in fields_in_graph
     )
     panel_html = _TAG_PAIR_FILTER_PANEL_HTML.replace("__CHECKBOX_ITEMS__", checkbox_items)
     script_html = _TAG_PAIR_FILTER_SCRIPT_TEMPLATE.replace("__ALL_TAGS_JSON__", all_tags_json)
@@ -1277,12 +1327,14 @@ def build_tag_pair_graph(pair_stats):
     return graph
 
 
-def build_tag_pair_data(df, top_tags, min_pair_count, min_pmi, max_pmi):
-    """Orchestrator, analogous to build_field_data. Returns (pair_stats,
-    keep_tags) -- keep_tags is the full top-K tag universe (needed by
-    tag_pair_matrix separately from pair_stats, which only has surviving
-    pairs)."""
-    tag_table = build_document_tag_table(df)
+def build_tag_pair_data(df, top_tags, min_pair_count, min_pmi, max_pmi,
+                         fields=TAG_PAIR_FIELDS):
+    """Orchestrator, analogous to build_field_data. Pools the given fields
+    (default TAG_PAIR_FIELDS -- fandom/additional_tags, excluding the
+    distorting relationship/character). Returns (pair_stats, keep_tags) --
+    keep_tags is the full top-K tag universe (needed by tag_pair_matrix
+    separately from pair_stats, which only has surviving pairs)."""
+    tag_table = build_document_tag_table(df, fields=fields)
     keep_tags = top_k_tags_by_document_frequency(tag_table, top_tags)
     if keep_tags is None:
         keep_tags = set(tag_table["tag_id"].unique())
@@ -1345,9 +1397,14 @@ def build_arg_parser():
                          help="Only build heatmaps, skip the network")
     parser.add_argument("--tag-pairs", action="store_true",
                          help="Also compute/render tag-pair co-occurrence statistics "
-                              "(lift/PMI) across fandom/relationship/character/"
-                              "additional_tags -- which pairs of tags co-occur "
+                              "(lift/PMI) across the --tag-pair-fields (default fandom/"
+                              "additional_tags) -- which pairs of tags co-occur "
                               "statistically more or less than chance (default: off)")
+    parser.add_argument("--tag-pair-fields", nargs="+", default=TAG_PAIR_FIELDS,
+                         metavar="FIELD",
+                         help="For --tag-pairs: which fields' tags to pool (default: "
+                              "fandom additional_tags; relationship and character are "
+                              "excluded because they distort the co-occurrence signal)")
     parser.add_argument("--top-tags", type=int, default=40,
                          help="For --tag-pairs: top N tags overall, by document "
                               "frequency, before computing pairwise stats (default: 40)")
@@ -1377,11 +1434,29 @@ def build_arg_parser():
     parser.add_argument("--pair-fields", nargs="+", default=FIELD_PAIR_FIELDS,
                          metavar="FIELD",
                          help="For --field-pairs: which fields to cross against each "
-                              "other (default: all seven metadata fields)")
+                              "other (default: rating warnings category fandom "
+                              "additional_tags; relationship and character are excluded)")
     parser.add_argument("--pair-top-n", type=int, default=30,
-                         help="For --field-pairs: cap each field to its top N most "
-                              "frequent values so high-cardinality fields stay legible "
+                         help="For --field-pairs/--field-pmi: cap each field to its top N "
+                              "most frequent values so high-cardinality fields stay legible "
                               "(default: 30)")
+    parser.add_argument("--field-pmi", action="store_true",
+                         help="Also render PMI (log2 lift) heatmaps pairing an anchor field "
+                              "against each --field-pmi-fields field -- cell = how much more "
+                              "(or less) than chance those two values co-occur. Diverging "
+                              "scale centered at 0; a blank cell means the pair never "
+                              "co-occurs (default: off)")
+    parser.add_argument("--field-pmi-anchor", default="fandom", metavar="FIELD",
+                         help="For --field-pmi: the field on the rows (default: fandom)")
+    parser.add_argument("--field-pmi-fields", nargs="+",
+                         default=["additional_tags", "rating", "warnings", "category"],
+                         metavar="FIELD",
+                         help="For --field-pmi: the fields to pair the anchor against, one "
+                              "heatmap each (default: additional_tags rating warnings category)")
+    parser.add_argument("--field-pmi-min-count", type=int, default=2,
+                         help="For --field-pmi: blank out a cell whose pair co-occurs in "
+                              "fewer than this many works -- PMI is meaningless at tiny "
+                              "sample sizes (default: 2)")
     return parser
 
 
@@ -1459,13 +1534,31 @@ def main(argv=None):
             render_heatmap_html(matrix, title, base + ".html", normalized=True,
                                  xlabel=col_field, ylabel=row_field, cbar_label=cbar)
 
+    if args.field_pmi and not args.network_only:
+        anchor = args.field_pmi_anchor
+        print(f"Building field PMI heatmaps ({anchor} by {len(args.field_pmi_fields)} fields)")
+        os.makedirs(args.heatmap_out_dir, exist_ok=True)
+        for col_field in args.field_pmi_fields:
+            matrix = field_pair_pmi_matrix(df, anchor, col_field, args.pair_top_n,
+                                           args.field_pmi_min_count)
+            base = os.path.join(args.heatmap_out_dir,
+                                 f"heatmap_pmi_{anchor}_by_{col_field}")
+            title = f"{anchor} by {col_field} (PMI)"
+            cbar = "PMI (log2 lift)"
+            render_heatmap(matrix, title, base + ".png", cmap="coolwarm", center=0,
+                           xlabel=col_field, ylabel=anchor, cbar_label=cbar, fmt=".2f")
+            write_heatmap_csv(matrix, base + ".csv")
+            render_heatmap_html(matrix, title, base + ".html", cmap="coolwarm", center=0,
+                                 xlabel=col_field, ylabel=anchor, cbar_label=cbar, fmt=".2f")
+
     if args.tag_pairs:
         if args.min_pmi <= args.max_pmi:
             print(f"  warning: --min-pmi ({args.min_pmi}) <= --max-pmi ({args.max_pmi}) -- "
                   "these bands overlap and will include nearly all pairs", file=sys.stderr)
 
         pair_stats, keep_tags = build_tag_pair_data(
-            df, args.top_tags, args.min_pair_count, args.min_pmi, args.max_pmi)
+            df, args.top_tags, args.min_pair_count, args.min_pmi, args.max_pmi,
+            fields=args.tag_pair_fields)
 
         if not args.heatmaps_only:
             print("Building tag-pair network graph")
