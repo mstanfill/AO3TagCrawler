@@ -249,6 +249,15 @@ def run_frequency_checks(tmpdir, script_path):
           default_args.cluster_meta_network_out == "ao3_tag_cluster_meta_network.html")
     check("--gexf-out defaults to None (opt-in)", default_args.gexf_out is None)
     check("--all-tags defaults to False", default_args.all_tags is False)
+    check("--cluster-fields defaults to CLUSTER_FIELDS (excludes fandom/relationship/character)",
+          default_args.cluster_fields == analysis.CLUSTER_FIELDS
+          and not ({"fandom", "relationship", "character"} & set(default_args.cluster_fields)),
+          f"got {default_args.cluster_fields}")
+    override_args = parser.parse_args(
+        ["--input", csv_path, "--cluster-fields", "rating", "additional_tags"])
+    check("--cluster-fields override parses the listed fields",
+          override_args.cluster_fields == ["rating", "additional_tags"],
+          f"got {override_args.cluster_fields}")
     check("--min-cluster-size defaults to 1", default_args.min_cluster_size == 1)
     check("--frequency-only defaults to False", default_args.frequency_only is False)
     check("--clusters-only defaults to False", default_args.clusters_only is False)
@@ -340,8 +349,11 @@ def run_clustering_checks(tmpdir, script_path):
           rare_bob_filtered.empty, f"got {rare_bob_filtered}")
 
     # --top-tags truncation across all 7 fields: at k=8, the 6 always-4-count
-    # tags plus the two alphabetically-first count=3 tags.
-    pair_stats8, keep_tags8 = analysis.build_all_fields_pair_data(df, top_tags=8, min_pair_count=2)
+    # tags plus the two alphabetically-first count=3 tags. (fields=ALL_METADATA_FIELDS
+    # exercises the 7-field pool; the default now excludes 3 fields -- see the
+    # reduced-default checks below.)
+    pair_stats8, keep_tags8 = analysis.build_all_fields_pair_data(
+        df, top_tags=8, min_pair_count=2, fields=analysis.ALL_METADATA_FIELDS)
     expected_top8 = {
         "category::F/M", "character::Bob", "fandom::Alpha", "rating::Mature",
         "relationship::A/B", "warnings::No Archive Warnings Apply",
@@ -354,7 +366,7 @@ def run_clustering_checks(tmpdir, script_path):
     # top-K by document frequency (this Python-level path was previously
     # unreachable from the CLI, since --top-tags was numeric-only).
     pair_stats_all, keep_tags_all = analysis.build_all_fields_pair_data(
-        df, top_tags=None, min_pair_count=2)
+        df, top_tags=None, min_pair_count=2, fields=analysis.ALL_METADATA_FIELDS)
     check("top_tags=None (--all-tags) keeps all 14 tags",
           keep_tags_all == all_tags, f"got {keep_tags_all}")
 
@@ -369,7 +381,8 @@ def run_clustering_checks(tmpdir, script_path):
     # Community detection recovers the two known blocks: exclude RareThing
     # (top_tags=13, the lowest-count tag) so its isolated node can't muddy a
     # clean 2-community split.
-    pair_stats13, keep_tags13 = analysis.build_all_fields_pair_data(df, top_tags=13, min_pair_count=2)
+    pair_stats13, keep_tags13 = analysis.build_all_fields_pair_data(
+        df, top_tags=13, min_pair_count=2, fields=analysis.ALL_METADATA_FIELDS)
     check("--top-tags 13 excludes RareThing",
           "additional_tags::RareThing" not in keep_tags13, f"got {keep_tags13}")
     graph13 = analysis.build_cluster_graph(pair_stats13, keep_tags13)
@@ -387,7 +400,37 @@ def run_clustering_checks(tmpdir, script_path):
           {frozenset(g) for g in cluster_groups} == {frozenset(block_a_tags), frozenset(block_b_tags)},
           f"got {cluster_groups}")
 
-    # Full CLI run (defaults + --gexf-out) produces every output.
+    # NEW DEFAULT: build_all_fields_pair_data with no fields= arg pools
+    # CLUSTER_FIELDS (rating/warnings/category/additional_tags), excluding the
+    # distorting fandom/relationship/character.
+    excluded = ("fandom::", "relationship::", "character::")
+    _, keep_default = analysis.build_all_fields_pair_data(df, top_tags=None, min_pair_count=2)
+    check("default cluster pool excludes fandom/relationship/character tags",
+          not any(t.startswith(excluded) for t in keep_default), f"got {sorted(keep_default)}")
+    check("default cluster pool is exactly the tags from the 4 clustering fields",
+          keep_default == {t for t in all_tags if not t.startswith(excluded)},
+          f"got {sorted(keep_default)}")
+    check("CLUSTER_FIELDS is ALL_METADATA_FIELDS minus fandom/relationship/character",
+          set(analysis.CLUSTER_FIELDS) == set(analysis.ALL_METADATA_FIELDS)
+          - {"fandom", "relationship", "character"}, f"got {analysis.CLUSTER_FIELDS}")
+
+    # Labeling is independent of the cluster pool: clusters built from the
+    # reduced default still get fandom labels (block A works -> Alpha, block B
+    # -> Beta), read straight from the metadata.
+    ps_r, kt_r = analysis.build_all_fields_pair_data(df, top_tags=None, min_pair_count=2)
+    clusters_r = analysis.assign_cluster_ids(
+        analysis.detect_communities(analysis.build_cluster_graph(ps_r, kt_r)))
+    fandom_summary_r = analysis.compute_cluster_fandom_summary(df, clusters_r, top_n=3)
+    check("fandom labels still populate though fandom is not a cluster field",
+          (fandom_summary_r["n_fandoms"] > 0).any()
+          and fandom_summary_r["top_fandoms"].str.contains("Alpha|Beta").any(),
+          f"got {fandom_summary_r[['cluster_id', 'n_fandoms', 'top_fandoms']].to_dict('records')}")
+
+    # Full CLI run (--gexf-out) produces every output. Passes --cluster-fields
+    # with all 7 fields (the override path), reproducing the pre-reduction
+    # behavior this section hand-verifies: 14 tags, --top-tags 13 drops
+    # RareThing, exactly the two blocks. (The reduced *default* is covered by
+    # its own compact CLI run below.)
     full_dir = os.path.join(tmpdir, "full_run")
     os.makedirs(full_dir, exist_ok=True)
     freq_out = os.path.join(full_dir, "frequency.csv")
@@ -400,7 +443,8 @@ def run_clustering_checks(tmpdir, script_path):
          "--frequency-out", freq_out, "--cluster-network-out", network_out,
          "--cluster-meta-network-out", meta_network_out,
          "--gexf-out", gexf_out,
-         "--clusters-out", clusters_out, "--top-tags", "13"],
+         "--clusters-out", clusters_out, "--top-tags", "13",
+         "--cluster-fields", *analysis.ALL_METADATA_FIELDS],
         capture_output=True, text=True,
     )
     check("full default main() run exits 0", result.returncode == 0, f"stderr: {result.stderr}")
@@ -466,9 +510,14 @@ def run_clustering_checks(tmpdir, script_path):
           and cli_a_cluster_ids != cli_b_cluster_ids,
           f"block A cluster ids: {cli_a_cluster_ids}, block B cluster ids: {cli_b_cluster_ids}")
 
-    # --all-tags CLI run: every kept tag gets a row, including RareThing
-    # (isolated node with zero surviving edges, per the existing "Found
-    # Family stays as an all-zero row" precedent from tag_pair_matrix).
+    # --all-tags CLI run on the DEFAULT (reduced) cluster fields: every kept
+    # tag gets a row, including RareThing (isolated node with zero surviving
+    # edges, per the "Found Family stays as an all-zero row" precedent). This
+    # also verifies end-to-end that the default pool excludes fandom/
+    # relationship/character -- --all-tags drops the top-N cap but not the
+    # field selection (they're orthogonal).
+    excluded_prefixes = ("fandom::", "relationship::", "character::")
+    reduced_pool_tags = {t for t in all_tags if not t.startswith(excluded_prefixes)}
     all_tags_dir = os.path.join(tmpdir, "all_tags_run")
     os.makedirs(all_tags_dir, exist_ok=True)
     all_tags_clusters_out = os.path.join(all_tags_dir, "clusters.csv")
@@ -483,8 +532,10 @@ def run_clustering_checks(tmpdir, script_path):
           f"stderr: {result_all_tags.stderr}")
     with open(all_tags_clusters_out, newline="", encoding="utf-8") as f:
         all_tags_rows = list(csv.DictReader(f))
-    check("--all-tags CLI run includes all 14 tags in the clusters CSV",
-          {row["tag_id"] for row in all_tags_rows} == all_tags,
+    check("--all-tags CLI run on the default reduced pool includes exactly the 9 "
+          "tags from rating/warnings/category/additional_tags (no fandom/"
+          "relationship/character)",
+          {row["tag_id"] for row in all_tags_rows} == reduced_pool_tags,
           f"got {len(all_tags_rows)} rows: {[row['tag_id'] for row in all_tags_rows]}")
 
 
