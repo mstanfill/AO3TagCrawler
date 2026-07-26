@@ -62,6 +62,7 @@ ao3_tags.csv ─▶ ao3_tag_work_ids.csv ─▶ ao3_tag_metadata.csv   ← the h
 | **`ao3_tag_analysis.py`** → [details](#tag-analysis) | `ao3_tag_metadata.csv` | `ao3_additional_tags_frequency.csv`, `ao3_tag_clusters.csv`, `ao3_tag_cluster_network.html` (opt. meta-network, GEXF) | Most/least common additional_tags; cross-field tag communities |
 | **`ao3_tag_fandom_labels.py`** → [details](#fandom-labeling) | `ao3_tag_metadata.csv` + a tag CSV (default `ao3_tag_clusters.csv`) | `ao3_tag_clusters_with_fandoms.csv`, `ao3_cluster_fandoms.csv` | Which fandom(s) each tag/cluster actually co-occurs with |
 | **`ao3_tag_counts.py`** → [details](#tags-per-story) | `ao3_tag_metadata.csv` | `ao3_tags_per_story_stats.csv` | Descriptive stats on distinct tags per work (pooled + per field) |
+| **`ao3_tag_fandom_spread.py`** → [details](#fandom-spread-per-tag) | `ao3_tag_metadata.csv` | `ao3_tag_fandom_spread.csv` | How many distinct fandoms each tag appears on (all additional_tags by default) |
 | **`ao3_tag_wrangling.py`** → [details](#tag-wrangling) | `ao3_tag_metadata.csv` + optional `ao3_tag_synonyms.csv` | `ao3_seed_tag_literal_usage.csv`, `ao3_seed_tag_synonym_breakdown.csv` | How often authors literally typed the canonical tag vs. a wrangled synonym |
 
 Every script has a notebook twin (`*.ipynb`) with the same logic hand-copied
@@ -776,6 +777,58 @@ the table.
 structured like `ao3_tag_wrangling.ipynb` — edit the Configuration cell, then
 run all cells in order. The stats table renders inline in addition to being
 saved to disk.
+
+## Fandom spread per tag
+
+`ao3_tag_fandom_spread.py` (and its notebook twin, `ao3_tag_fandom_spread.ipynb`)
+answers: **how many distinct fandoms does each tag appear on?** For every value
+of a tag field (default `additional_tags`), it reports the distinct-fandom count
+and the top few co-occurring fandoms — so a cross-cutting trope like `Angst`
+shows a high spread across many fandoms, while a niche tag shows only a handful.
+It reads a local CSV only — **no network dependency**.
+
+It reuses `ao3_tag_fandom_labels.py`'s co-occurrence computation (`n_fandoms` /
+`top_fandoms`), so it inherits the same honest semantics: works are deduplicated
+by `work_id` first (the scraper emits one row per `(seed tag, work)`), `fandom`
+is treated as multi-valued (a crossover work counts each of its fandoms), and the
+percentage denominator is each tag's own work count (so a tag used partly on
+fandom-less works shows percentages that don't sum to 100 rather than silently
+renormalizing).
+
+### Output file
+
+**`ao3_tag_fandom_spread.csv`** — one row per distinct value of the chosen field,
+columns `field`, `value`, `n_works` (distinct works carrying the tag),
+`n_fandoms` (distinct fandoms those works span), `top_fandoms` (`"Fandom A (62%),
+…"`). Sorted most-cross-cutting first (`n_fandoms` desc, then `n_works` desc, then
+`value`).
+
+### Usage
+
+```bash
+# Distinct fandoms per additional_tags value (the default)
+python ao3_tag_fandom_spread.py
+
+# Analyze a different field, and list more fandoms per tag
+python ao3_tag_fandom_spread.py --field character --top-n 5
+```
+
+### All options
+
+```
+--input FILE   Metadata CSV to read (default: ao3_tag_metadata.csv)
+--field FIELD  Tag field to analyze (default: additional_tags)
+--top-n N      Top co-occurring fandoms to list per tag (default: 3)
+--out FILE     Output CSV (default: ao3_tag_fandom_spread.csv)
+-h, --help
+```
+
+### Notebook
+
+`ao3_tag_fandom_spread.ipynb` is a Jupyter notebook version of the same tool,
+structured like `ao3_tag_counts.ipynb` — edit the Configuration cell, then run
+all cells in order. The spread table renders inline in addition to being saved to
+disk.
 
 ## AO3 terms of service
 
