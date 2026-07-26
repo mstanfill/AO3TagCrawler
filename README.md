@@ -58,7 +58,7 @@ ao3_tags.csv ─▶ ao3_tag_work_ids.csv ─▶ ao3_tag_metadata.csv   ← the h
 | Script | Reads | Writes | What it answers |
 |---|---|---|---|
 | **`ao3_tag_scraper.py`** *(networked)* | — (AO3 tag cloud), or `--tag`/`--tag-url` | `ao3_tags.csv`, `ao3_tag_work_ids.csv`, `ao3_tag_metadata.csv` | Collects the tag list and metadata-only records (one row per `(seed tag, work)`) |
-| **`ao3_tag_visualizer.py`** → [details](#visualization) | `ao3_tag_metadata.csv` | `ao3_tag_network.html`, `heatmaps/heatmap_<field>.{png,csv,html}` (opt. `--tag-pairs`, `--field-pairs` outputs) | How each seed tag relates to its works' attributes |
+| **`ao3_tag_visualizer.py`** → [details](#visualization) | `ao3_tag_metadata.csv` | `ao3_tag_network.html`, `heatmaps/heatmap_<field>.{png,csv,html}` (opt. `--tag-pairs`, `--field-pairs`, `--field-pmi` outputs) | How each seed tag relates to its works' attributes |
 | **`ao3_tag_analysis.py`** → [details](#tag-analysis) | `ao3_tag_metadata.csv` | `ao3_additional_tags_frequency.csv`, `ao3_tag_clusters.csv`, `ao3_tag_cluster_network.html` (opt. meta-network, GEXF) | Most/least common additional_tags; cross-field tag communities |
 | **`ao3_tag_fandom_labels.py`** → [details](#fandom-labeling) | `ao3_tag_metadata.csv` + a tag CSV (default `ao3_tag_clusters.csv`) | `ao3_tag_clusters_with_fandoms.csv`, `ao3_cluster_fandoms.csv` | Which fandom(s) each tag/cluster actually co-occurs with |
 | **`ao3_tag_counts.py`** → [details](#tags-per-story) | `ao3_tag_metadata.csv` | `ao3_tags_per_story_stats.csv` | Descriptive stats on distinct tags per work (pooled + per field) |
@@ -268,7 +268,8 @@ additional-tags frequency ranking, and the per-story tag counts
 | **Co-occurrence heatmaps** | One per field: rows = seed tags, columns = attribute values, cell (color and displayed number) = %% of that seed tag's works |
 | **High-cardinality filtering** | `fandom` and `additional_tags` are filtered to their top-N most frequent values overall (`--top-fandoms`, `--top-additional-tags`) before either visualization is built |
 | **Configurable thresholds** | `--min-count` (or `--min-proportion`, mutually exclusive) drops noisy edges/cells; `--top-seed-tags` limits rows/nodes to the highest-volume seed tags |
-| **Tag-pair co-occurrence (opt-in)** | `--tag-pairs` computes statistical lift/PMI between pairs of `fandom`/`relationship`/`character`/`additional_tags` tags across the whole dataset — which pairs co-occur more or less than chance — and renders a second network graph + heatmap |
+| **Tag-pair co-occurrence (opt-in)** | `--tag-pairs` computes statistical lift/PMI between pairs of tags (by default `fandom`/`additional_tags`; `relationship` and `character` are excluded because they distort the signal, configurable via `--tag-pair-fields`) across the whole dataset — which pairs co-occur more or less than chance — and renders a second network graph + heatmap |
+| **Field PMI heatmaps (opt-in)** | `--field-pmi` renders PMI (log2 lift) heatmaps pairing an anchor field (default `fandom`) against each of `--field-pmi-fields` (default `additional_tags rating warnings category`) — each cell how much more (or less) than chance those two values co-occur, on a diverging scale centered at 0 |
 
 ### Output files
 
@@ -299,7 +300,26 @@ that also carry the column value** (e.g. of works in category `Gen`, what % are
 in each fandom). Row-normalized and therefore directional, so both directions
 are written (`category_by_fandom` and `fandom_by_category` answer different
 questions). Distinct works only; each field capped to its top `--pair-top-n`
-values. Same three formats as the other heatmaps
+values. Same three formats as the other heatmaps. By default the crossed
+fields (`--pair-fields`) exclude `relationship` and `character`
+
+**`heatmaps/heatmap_pmi_<anchor>_by_<field>.png` / `.csv` / `.html`** — only
+written with `--field-pmi`: one PMI (log2 lift) heatmap per `--field-pmi-fields`
+field, rows = the anchor field's values (default `fandom`), columns = the paired
+field's, each cell `log2(joint · n_docs / (count_anchor · count_field))` — how
+much more (>0) or less (<0) than chance the two values co-occur (the same
+statistic `--tag-pairs` uses). Diverging scale centered at 0; a **blank** cell
+means the pair never co-occurs, or co-occurs in fewer than `--field-pmi-min-count`
+works (deliberately distinct from a meaningful 0 = independence). Distinct works
+only; each field capped to `--pair-top-n`
+
+> **Note on `character` and `relationship`:** they are excluded by default from
+> the co-occurrence/network analyses (tag-pairs, field-pairs, clustering, and
+> the seed-tag network/heatmaps) because these high-cardinality, work-identifying
+> fields distort the signal — re-include them via `--tag-pair-fields` /
+> `--pair-fields` / `--cluster-fields`. They are **still** collected by the
+> scraper and still reported by the per-story counts (`ao3_tag_counts.py`) and
+> tag wrangling (`ao3_tag_wrangling.py`).
 
 ### Usage
 
@@ -341,11 +361,18 @@ python ao3_tag_visualizer.py --field-pairs
 # Narrow to specific fields (all ordered pairs among them) and cap each field's
 # values -- e.g. just category, fandom, and rating, top 20 values each.
 python ao3_tag_visualizer.py --field-pairs --pair-fields category fandom rating --pair-top-n 20
+
+# PMI (log2 lift) heatmaps: fandom by additional_tags, rating, warnings, category
+# -- how much more/less than chance each pair of values co-occurs. Off by default.
+python ao3_tag_visualizer.py --field-pmi
+
+# Change the anchor and the paired fields (one heatmap each)
+python ao3_tag_visualizer.py --field-pmi --field-pmi-anchor category --field-pmi-fields fandom rating
 ```
 
 `--tag-pairs` answers a different question than the rest of this tool: not "which
 attribute values does a seed tag associate with", but "which pairs of tags -- pooled
-across `fandom`/`relationship`/`character`/`additional_tags` -- statistically tend to
+across `--tag-pair-fields` (default `fandom`/`additional_tags`) -- statistically tend to
 co-occur (or avoid each other) more than chance would predict". Raw co-occurrence
 counts conflate "both tags are individually common" with "these two tags are actually
 associated"; lift and PMI correct for that:
@@ -379,8 +406,10 @@ work) whose lift would otherwise look enormous but isn't statistically meaningfu
 --network-only            Only build the network, skip heatmaps
 --heatmaps-only           Only build heatmaps, skip the network
 --tag-pairs               Also compute/render tag-pair co-occurrence statistics
-                          (lift/PMI) across fandom/relationship/character/
-                          additional_tags (default: off)
+                          (lift/PMI) across the --tag-pair-fields (default: off)
+--tag-pair-fields FIELD ...  For --tag-pairs: which fields' tags to pool (default:
+                          fandom additional_tags; relationship and character
+                          excluded as distorting)
 --top-tags N              Top N tags overall, by document frequency (default: 40)
 --min-pair-count N        Drop pairs with fewer co-occurrences than this (default: 2)
 --min-pmi F               "Most likely" threshold: keep pairs with pmi >= this (default: 1.0)
@@ -391,10 +420,18 @@ work) whose lift would otherwise look enormous but isn't statistically meaningfu
                                 (default: heatmaps/heatmap_tag_pairs.png)
 --field-pairs             Also render a field-vs-field co-occurrence heatmap for
                            every ordered pair of metadata fields, row-normalized
---pair-fields FIELD ...    For --field-pairs: which fields to cross (default: all
-                           seven metadata fields)
---pair-top-n N            For --field-pairs: cap each field to its top N values
-                           (default: 30)
+--pair-fields FIELD ...    For --field-pairs: which fields to cross (default: rating
+                           warnings category fandom additional_tags; relationship
+                           and character excluded)
+--pair-top-n N            For --field-pairs/--field-pmi: cap each field to its top N
+                           values (default: 30)
+--field-pmi               Also render PMI (log2 lift) heatmaps of an anchor field
+                           against each --field-pmi-fields field (default: off)
+--field-pmi-anchor FIELD   For --field-pmi: the field on the rows (default: fandom)
+--field-pmi-fields FIELD ...  For --field-pmi: fields to pair the anchor against, one
+                           heatmap each (default: additional_tags rating warnings category)
+--field-pmi-min-count N    For --field-pmi: blank a cell whose pair co-occurs in fewer
+                           than this many works (default: 2)
 -h, --help
 ```
 
