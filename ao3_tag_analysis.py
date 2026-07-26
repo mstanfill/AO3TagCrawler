@@ -28,6 +28,15 @@ import ao3_tag_visualizer as viz
 ALL_METADATA_FIELDS = ["rating", "warnings", "category", "fandom",
                         "relationship", "character", "additional_tags"]
 
+# Default field pool for clustering: ALL_METADATA_FIELDS minus fandom,
+# relationship, and character. Those three are high-cardinality and
+# work-identifying -- they dominate the co-occurrence signal and distort the
+# communities -- so clustering pools only the structured fields plus the
+# folksonomy additional_tags. Cluster labeling still reads fandom from the
+# metadata independently (compute_cluster_fandom_summary,
+# ao3_tag_fandom_labels.py), so excluding it here does not affect labels.
+CLUSTER_FIELDS = ["rating", "warnings", "category", "additional_tags"]
+
 # Fixed seed for Louvain's internal tie-breaking -- not user-exposed, exists
 # purely so the same input always produces the same partition (matches this
 # codebase's existing preference for deterministic output, e.g. the
@@ -129,11 +138,13 @@ def print_frequency_summary(most_frequent_seed, most_frequent_non_seed, least_fr
 # needs tens of gigabytes, which is exactly what motivated this rewrite).
 # ---------------------------------------------------------------------------
 
-def build_all_fields_pair_data(df, top_tags, min_pair_count):
-    """Orchestrator, analogous to viz.build_tag_pair_data but pooling all
-    seven metadata fields instead of just the four folksonomy ones.
-    Returns (pair_stats, keep_tags)."""
-    tag_table = viz.build_document_tag_table(df, fields=ALL_METADATA_FIELDS)
+def build_all_fields_pair_data(df, top_tags, min_pair_count, fields=CLUSTER_FIELDS):
+    """Orchestrator, analogous to viz.build_tag_pair_data but pooling the
+    given metadata fields (default CLUSTER_FIELDS -- rating/warnings/category/
+    additional_tags, excluding the distorting fandom/relationship/character)
+    instead of just the four folksonomy ones. Pass fields=ALL_METADATA_FIELDS
+    to cluster over every field. Returns (pair_stats, keep_tags)."""
+    tag_table = viz.build_document_tag_table(df, fields=fields)
     keep_tags = viz.top_k_tags_by_document_frequency(tag_table, top_tags)
     if keep_tags is None:
         keep_tags = set(tag_table["tag_id"].unique())
@@ -641,9 +652,18 @@ def build_arg_parser():
                          help="Top N tags overall, pooled across all 7 metadata "
                               "fields, by document frequency, before clustering. "
                               "Overridden by --all-tags (default: 60)")
+    parser.add_argument("--cluster-fields", nargs="+", default=CLUSTER_FIELDS,
+                         choices=ALL_METADATA_FIELDS, metavar="FIELD",
+                         help="Metadata fields to cluster on (default: rating "
+                              "warnings category additional_tags; fandom, "
+                              "relationship, and character are excluded because "
+                              "they distort the communities). Cluster fandom labels "
+                              "are computed separately and are unaffected")
     parser.add_argument("--all-tags", action="store_true",
-                         help="Cluster using every tag from all 7 metadata fields, "
-                              "ignoring --top-tags (default: off)")
+                         help="Cluster using every tag within the selected "
+                              "--cluster-fields, ignoring --top-tags -- drops the "
+                              "top-N cap, independent of which fields are pooled "
+                              "(default: off)")
     parser.add_argument("--min-pair-count", type=int, default=2,
                          help="Drop pairs co-occurring fewer than this many times "
                               "before clustering -- lift/PMI is unreliable at tiny "
@@ -705,7 +725,7 @@ def main(argv=None):
                   "this may be slow/large on bigger datasets", file=sys.stderr)
         top_tags = None if args.all_tags else args.top_tags
         pair_stats, keep_tags = build_all_fields_pair_data(
-            df, top_tags, args.min_pair_count)
+            df, top_tags, args.min_pair_count, fields=args.cluster_fields)
         cluster_graph = build_cluster_graph(pair_stats, keep_tags)
         communities = detect_communities(cluster_graph, resolution=args.cluster_resolution)
         communities = merge_small_communities(communities, cluster_graph, args.min_cluster_size)

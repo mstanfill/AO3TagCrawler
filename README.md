@@ -414,7 +414,7 @@ existing `ao3_tag_metadata.csv` and runs two further analyses, beyond
 | Feature | Detail |
 |---|---|
 | **additional_tags frequency ranking** | Three categories: most frequent `additional_tags` values that are also a seed tag, most frequent values that aren't, and least frequent values (excluding one-off singletons) |
-| **Cross-field community detection** | Pools labels from *all* metadata fields (`rating`, `warnings`, `category`, `fandom`, `relationship`, `character`, `additional_tags`) — or every tag with `--all-tags` — and groups them by lift/PMI similarity via graph-based community detection (Louvain) — which labels of any kind tend to appear together — rendered as an interactive network graph plus a discrete cluster-membership CSV, optionally enforcing a minimum cluster size via `--min-cluster-size` |
+| **Cross-field community detection** | Pools labels from the clustering fields — by default `rating`, `warnings`, `category`, `additional_tags` (`fandom`, `relationship`, and `character` are **excluded** because these high-cardinality, work-identifying fields dominate and distort the communities; override with `--cluster-fields`) — or every tag within them with `--all-tags`, and groups them by lift/PMI similarity via graph-based community detection (Louvain) — which labels of any kind tend to appear together — rendered as an interactive network graph plus a discrete cluster-membership CSV, optionally enforcing a minimum cluster size via `--min-cluster-size`. Cluster **fandom labels** are computed separately (from fandom co-occurrence in the metadata), so excluding fandom from clustering does not affect them |
 
 Both analyses run by default; `--frequency-only`/`--clusters-only` narrow it to one.
 
@@ -483,9 +483,11 @@ python ao3_tag_analysis.py --top-tags 100 --cluster-resolution 1.5
 python ao3_tag_analysis.py --all-tags --min-cluster-size 3
 ```
 
-The clustering pipeline pools all seven metadata fields into one namespaced label
-space (`f"{field}::{value}"`) and computes pairwise lift/PMI, the same statistic
-`--tag-pairs` uses:
+The clustering pipeline pools the clustering fields (by default `rating`,
+`warnings`, `category`, `additional_tags` — `fandom`, `relationship`, and
+`character` are excluded as distorting; change with `--cluster-fields`) into one
+namespaced label space (`f"{field}::{value}"`) and computes pairwise lift/PMI,
+the same statistic `--tag-pairs` uses:
 
 - `lift(A, B) = P(A, B) / (P(A) * P(B))`
 - `pmi(A, B) = log2(lift(A, B))`
@@ -511,11 +513,16 @@ meaningless but enormous lift).
                               one-off singletons (default: 2)
 --frequency-out FILE         Frequency ranking CSV output
                               (default: ao3_additional_tags_frequency.csv)
---top-tags N                 Top N tags overall, pooled across all 7 metadata
-                              fields, by document frequency, before clustering.
+--cluster-fields FIELD [...] Metadata fields to cluster on (default: rating
+                              warnings category additional_tags; fandom,
+                              relationship, and character are excluded because they
+                              distort the communities). Cluster fandom labels are
+                              computed separately and are unaffected
+--top-tags N                 Top N tags overall, pooled across the --cluster-fields,
+                              by document frequency, before clustering.
                               Overridden by --all-tags (default: 60)
---all-tags                   Cluster using every tag from all 7 metadata fields,
-                              ignoring --top-tags (default: off)
+--all-tags                   Cluster using every tag within the selected
+                              --cluster-fields, ignoring --top-tags (default: off)
 --min-pair-count N           Drop pairs co-occurring fewer than this many times
                               before clustering (default: 2)
 --cluster-resolution F       Louvain resolution -- higher means more, smaller
